@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "budgetcitoyen-api"
+version = "0.1.0"
+description = "API REST du projet BudgetCitoyen.fr - rendre le budget de l'Etat francais explorable"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "BudgetCitoyen.fr" }]
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "redis>=5.0",
+    "pandas>=2.2",
+    "slowapi>=0.1.9",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "black>=24.0",
+    "mypy>=1.10",
+    "types-redis",
+]
+
+[tool.setuptools.packages.find]
+include = ["api*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+plugins = []
+exclude = ["alembic/versions"]
+
+[[tool.mypy.overrides]]
+module = "slowapi.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
