@@ -15,3 +15,7 @@ class Mission(Base):
     nom_normalise: Mapped[str] = mapped_column(String(255))
     nom_officiel: Mapped[str] = mapped_column(String(255))
     annee: Mapped[int]
+    # Code LOLF de la mission (2 lettres, ex "JA" pour Justice): cle de
+    # rapprochement stable entre annees, absente des formats source les plus
+    # anciens (nullable dans ce cas).
+    code_mission: Mapped[str | None] = mapped_column(String(10), index=True)

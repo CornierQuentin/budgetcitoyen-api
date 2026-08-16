@@ -1,0 +1,47 @@
+{
+  "total_count": 6,
+  "results": [
+    {
+      "annee": 2025,
+      "type_de_recettes": "Recettes fiscales",
+      "code_ligne_recettes": 1101.0,
+      "libelle": "Impôt sur le revenu",
+      "montant_recettes_plf": 90000000000.0
+    },
+    {
+      "annee": 2025,
+      "type_de_recettes": "Recettes fiscales",
+      "code_ligne_recettes": 1301.0,
+      "libelle": "Impôt sur les sociétés",
+      "montant_recettes_plf": 70000000000.0
+    },
+    {
+      "annee": 2025,
+      "type_de_recettes": "Recettes fiscales",
+      "code_ligne_recettes": 1601.0,
+      "libelle": "Taxe sur la valeur ajoutée",
+      "montant_recettes_plf": 100000000000.0
+    },
+    {
+      "annee": 2025,
+      "type_de_recettes": "Recettes fiscales",
+      "code_ligne_recettes": 1501.0,
+      "libelle": "Taxe intérieure de consommation sur les produits énergétiques",
+      "montant_recettes_plf": 15000000000.0
+    },
+    {
+      "annee": 2025,
+      "type_de_recettes": "Recettes fiscales",
+      "code_ligne_recettes": 1303.0,
+      "libelle": "Contribution CDC representative de l'IS",
+      "montant_recettes_plf": 305000000.0
+    },
+    {
+      "annee": 2025,
+      "type_de_recettes": "Prélèvements sur les recettes de l'État au profit des collectivités territoriales",
+      "code_ligne_recettes": 3119.0,
+      "libelle": "Dotation de compensation",
+      "montant_recettes_plf": -1000000000.0
+    }
+  ]
+}
