@@ -10,7 +10,12 @@ class AnneeBudgetResponse(BaseModel):
     depenses_nettes: float
     recettes_nettes: float
     deficit: float
-    dette_pib: float
+    # Hors perimetre de cette passe d'ingestion (donnees INSEE dette/PIB non
+    # ingerees): `AnneeBudget.dette_pib` vaut toujours None pour l'instant,
+    # cf. `api.etl.loader.recalculer_annee_budget`. Doit rester optionnel
+    # ici, sans quoi la validation Pydantic rejette toute annee chargee par
+    # ce pipeline (bug constate a la verification post-ETL).
+    dette_pib: float | None
     source_url: str
 
 
