@@ -1,0 +1,40 @@
+{
+  "total_count": 5,
+  "results": [
+    {
+      "annee": 2025,
+      "type_de_recettes": "Recettes fiscales",
+      "code_ligne_recettes": 1101.0,
+      "libelle": "Impôt sur le revenu",
+      "montant_recettes_plf": 300349453469.0
+    },
+    {
+      "annee": 2025,
+      "type_de_recettes": "Recettes fiscales",
+      "code_ligne_recettes": 1601.0,
+      "libelle": "Taxe sur la valeur ajoutée",
+      "montant_recettes_plf": 200000000000.0
+    },
+    {
+      "annee": 2025,
+      "type_de_recettes": "Recettes non fiscales",
+      "code_ligne_recettes": 2001.0,
+      "libelle": "Produits du domaine de l'État",
+      "montant_recettes_plf": 20548548212.0
+    },
+    {
+      "annee": 2025,
+      "type_de_recettes": "Prélèvements sur les recettes de l'État au profit des collectivités territoriales",
+      "code_ligne_recettes": 3119.0,
+      "libelle": "Dotation globale de fonctionnement",
+      "montant_recettes_plf": 44188897951.0
+    },
+    {
+      "annee": 2025,
+      "type_de_recettes": "Prélèvement sur les recettes de l'État au profit de l'Union européenne",
+      "code_ligne_recettes": 3201.0,
+      "libelle": "Prélèvement au profit du budget de l'Union européenne",
+      "montant_recettes_plf": 23320855052.0
+    }
+  ]
+}

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import re
 import unicodedata
 from collections import defaultdict
@@ -37,6 +38,8 @@ from typing import Any
 
 from api.etl.sources import CODE_LIGNE_RECETTE_VERS_TYPE
 from api.models.recette import TypeRecette
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Structures intermediaires communes
@@ -90,6 +93,28 @@ class RecetteAggregat:
     type: TypeRecette
     montant_brut: float
     montant_net: float
+
+
+@dataclass(frozen=True)
+class PrelevementsSurRecettes:
+    """Total des "prelevements sur recettes" (PSR) d'une annee, par destinataire.
+
+    Les PSR (`type_de_recettes` commencant par "Prelevement(s)") ne sont PAS
+    des recettes de l'Etat: ce sont des sommes que l'Etat retrocede
+    directement aux collectivites territoriales ou a l'Union europeenne,
+    prelevees sur ses propres recettes avant meme qu'elles n'apparaissent au
+    budget general. Le "tableau d'equilibre" officiel du budget de l'Etat les
+    presente d'ailleurs a part, en deduction des recettes brutes, jamais
+    additionnees a celles-ci. Voir `extract_prelevements_sur_recettes`.
+    """
+
+    annee: int
+    collectivites: float
+    union_europeenne: float
+
+    @property
+    def total(self) -> float:
+        return self.collectivites + self.union_europeenne
 
 
 @dataclass(frozen=True)
@@ -529,10 +554,29 @@ def aggregate_depenses(records: list[DepenseRecord]) -> list[DepenseAggregat]:
 # ---------------------------------------------------------------------------
 
 
+# Valeurs reelles observees du champ `type_de_recettes` qui constituent des
+# "recettes" au sens du tableau d'equilibre du budget de l'Etat. Les deux
+# autres valeurs reelles ("Prelevement(s) sur les recettes de l'Etat au
+# profit ...") sont des PSR, traitees a part par
+# `extract_prelevements_sur_recettes` - volontairement PAS incluses ici.
+_TYPES_RECETTES_BUDGETAIRES = {"Recettes fiscales", "Recettes non fiscales"}
+
+
 def normalize_recettes_records_json(
     records: list[dict[str, Any]], annee: int
 ) -> list[RecetteRecord]:
     """Normalise les enregistrements 'recettes du budget general' (2024-2025).
+
+    Le champ `type_de_recettes` prend 4 valeurs reelles dans ce dataset:
+    "Recettes fiscales", "Recettes non fiscales", "Prelevements sur les
+    recettes de l'Etat au profit des collectivites territoriales" et
+    "Prelevement sur les recettes de l'Etat au profit de l'Union
+    europeenne". Seules les deux premieres sont de veritables recettes de
+    l'Etat: les lignes PSR ("Prelevement(s)...") sont exclues ici (elles ne
+    sont pas inserees dans `recette`, dont le `type` IR/TVA/IS/TICPE/AUTRES
+    n'a pas de sens pour un prelevement reverse) et traitees separement par
+    `extract_prelevements_sur_recettes`, a soustraire du total en aval - cf.
+    `api.etl.loader.recalculer_annee_budget`.
 
     `code_ligne_recettes` est mappe vers un `TypeRecette` stable via
     `CODE_LIGNE_RECETTE_VERS_TYPE` (IR/IS/TVA/TICPE); toute ligne dont le
@@ -540,6 +584,9 @@ def normalize_recettes_records_json(
     """
     out: list[RecetteRecord] = []
     for row in records:
+        type_recettes = row.get("type_de_recettes")
+        if type_recettes not in _TYPES_RECETTES_BUDGETAIRES:
+            continue
         code = row.get("code_ligne_recettes")
         code_f = float(code) if code is not None else None
         type_str = (
@@ -553,6 +600,51 @@ def normalize_recettes_records_json(
             )
         )
     return out
+
+
+def extract_prelevements_sur_recettes(
+    records: list[dict[str, Any]], annee: int
+) -> PrelevementsSurRecettes:
+    """Isole et somme les lignes PSR (prelevements sur recettes) d'une annee.
+
+    Opere sur les memes enregistrements bruts que
+    `normalize_recettes_records_json` (avant filtrage), pour en extraire ce
+    que cette derniere exclut volontairement: les lignes dont
+    `type_de_recettes` commence par "Prelevement" (les deux valeurs reelles
+    observees, PSR collectivites territoriales et PSR Union europeenne,
+    partagent ce prefixe). Le total retourne est celui a soustraire de la
+    somme des `recette.montant_net` pour obtenir `recettes_nettes`, selon la
+    methodologie du tableau d'equilibre officiel du budget de l'Etat (voir
+    `PrelevementsSurRecettes` et `api.etl.loader.recalculer_annee_budget`).
+    """
+    collectivites = 0.0
+    union_europeenne = 0.0
+    for row in records:
+        type_recettes = row.get("type_de_recettes") or ""
+        if not type_recettes.startswith("Prélèvement"):
+            continue
+        montant = clean_montant(row.get("montant_recettes_plf"))
+        type_lower = type_recettes.lower()
+        if "collectivit" in type_lower:
+            collectivites += montant
+        elif "union europ" in type_lower:
+            union_europeenne += montant
+        else:
+            # Categorie PSR non reconnue (nouvelle ligne introduite par la
+            # source apres cette passe d'implementation?): comptee quand
+            # meme dans le total (bucket collectivites par defaut) pour ne
+            # pas fausser recettes_nettes, mais signalee explicitement pour
+            # investigation.
+            logger.warning(
+                "annee %d: categorie PSR non reconnue %r (comptee avec les "
+                "collectivites par defaut)",
+                annee,
+                type_recettes,
+            )
+            collectivites += montant
+    return PrelevementsSurRecettes(
+        annee=annee, collectivites=collectivites, union_europeenne=union_europeenne
+    )
 
 
 def aggregate_recettes(records: list[RecetteRecord]) -> list[RecetteAggregat]:

@@ -181,8 +181,20 @@ async def _charger_depenses(
 # ---------------------------------------------------------------------------
 
 
-async def _charger_recettes(db: AsyncSession, client: httpx.AsyncClient, annees: list[int]) -> None:
+async def _charger_recettes(
+    db: AsyncSession, client: httpx.AsyncClient, annees: list[int]
+) -> dict[int, float]:
+    """Telecharge, normalise et charge les recettes de plusieurs annees.
+
+    Retourne le mapping {annee: total PSR (Md EUR->EUR, cf. plus bas)} des
+    "prelevements sur recettes" exclus de `recette` (PSR collectivites
+    territoriales + PSR Union europeenne, cf. `normalize.
+    extract_prelevements_sur_recettes`), a fournir ensuite a
+    `loader.recalculer_annee_budget` pour deduire `recettes_nettes`, selon
+    la methodologie du tableau d'equilibre officiel du budget de l'Etat.
+    """
     tous_les_aggregats: list[normalize.RecetteAggregat] = []
+    psr_par_annee: dict[int, float] = {}
     for annee in annees:
         dataset_id = sources.RECETTES_DATASETS_RECORDS[annee]
         raw = await _fetch_all_records(client, dataset_id)
@@ -190,12 +202,28 @@ async def _charger_recettes(db: AsyncSession, client: httpx.AsyncClient, annees:
         aggregats = normalize.aggregate_recettes(records)
         tous_les_aggregats.extend(aggregats)
         logger.info(
-            "recettes %d: %d lignes brutes -> %d types agreges",
+            "recettes %d: %d lignes brutes -> %d types agreges (Recettes fiscales/non "
+            "fiscales uniquement, PSR exclus)",
             annee,
             len(records),
             len(aggregats),
         )
+
+        psr = normalize.extract_prelevements_sur_recettes(raw, annee)
+        psr_par_annee[annee] = psr.total
+        # Tracabilite: la source (PSR) n'est pas stockee en base pour cette
+        # passe (cf. loader.recalculer_annee_budget), donc ce log est le
+        # seul enregistrement du montant exclu/soustrait - coherent avec le
+        # principe de sourcage systematique du projet.
+        logger.info(
+            "annee %d: PSR exclus des recettes = %.1f Md EUR (collectivites %.1f + UE %.1f)",
+            annee,
+            psr.total / 1e9,
+            psr.collectivites / 1e9,
+            psr.union_europeenne / 1e9,
+        )
     await loader.upsert_recettes(db, tous_les_aggregats)
+    return psr_par_annee
 
 
 # ---------------------------------------------------------------------------
@@ -239,24 +267,37 @@ async def run_etl(annees: Iterable[int], *, depenses: bool, recettes: bool) -> N
     )
 
     source_url_par_annee: dict[int, str] = {}
+    psr_par_annee: dict[int, float] = {}
 
     async with httpx.AsyncClient() as client, async_session_maker() as db:
         try:
             if depenses_annees:
                 source_url_par_annee = await _charger_depenses(db, client, depenses_annees)
             if recettes_annees:
-                await _charger_recettes(db, client, recettes_annees)
+                psr_par_annee = await _charger_recettes(db, client, recettes_annees)
 
             # Recalcule l'agregat annee_budget pour toute annee demandee ou
             # depenses ET recettes sont desormais presentes en base (que ce
             # soit charge lors de ce run ou d'un run precedent).
+            #
+            # Limitation connue: `psr_par_annee` ne contient que les PSR des
+            # annees de recettes traitees PENDANT ce run. Un run
+            # `--depenses-only` portant sur une annee dont les recettes ont
+            # ete chargees lors d'un run precedent recalculera
+            # `recettes_nettes` avec un PSR par defaut de 0.0 (non deduit) -
+            # cf. docstring de `loader.recalculer_annee_budget`. Non
+            # bloquant pour cette passe (le run complet 2019-2025 traite
+            # toujours depenses+recettes ensemble), documente pour une
+            # passe future si des runs partiels reguliers sont introduits.
             for annee in annees_list:
                 source_url = source_url_par_annee.get(annee) or sources.default_depenses_source_url(
                     annee
                 )
                 if source_url is None:
                     continue
-                await loader.recalculer_annee_budget(db, annee, source_url)
+                await loader.recalculer_annee_budget(
+                    db, annee, source_url, psr_par_annee.get(annee, 0.0)
+                )
 
             await db.commit()
             logger.info("ETL termine avec succes, transaction validee")

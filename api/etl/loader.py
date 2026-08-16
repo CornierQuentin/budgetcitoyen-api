@@ -204,13 +204,32 @@ async def upsert_recettes(db: AsyncSession, aggregats: Sequence[RecetteAggregat]
 
 
 async def recalculer_annee_budget(
-    db: AsyncSession, annee: int, source_url: str
+    db: AsyncSession,
+    annee: int,
+    source_url: str,
+    prelevements_sur_recettes: float = 0.0,
 ) -> AnneeBudget | None:
     """Recalcule l'agregat AnneeBudget d'une annee, si depenses ET recettes existent.
 
     - `depenses_nettes` = somme des `Depense.cp` (credits de paiement) de l'annee.
-    - `recettes_nettes` = somme de TOUS les `Recette.montant_net` de l'annee,
-      tous types confondus (IR/TVA/IS/TICPE/AUTRES).
+    - `recettes_nettes` = somme de TOUS les `Recette.montant_net` de l'annee
+      (types IR/TVA/IS/TICPE/AUTRES, deja limites aux "Recettes fiscales" et
+      "Recettes non fiscales" par `normalize.normalize_recettes_records_json`
+      - voir sa docstring), MOINS `prelevements_sur_recettes`.
+    - `prelevements_sur_recettes` (PSR): total des lignes source
+      "Prelevement(s) sur les recettes de l'Etat au profit des collectivites
+      territoriales / de l'Union europeenne" de l'annee, calcule en amont par
+      `normalize.extract_prelevements_sur_recettes` (ces lignes ne sont pas
+      stockees dans `recette` - voir sa docstring - donc leur total doit
+      etre fourni explicitement ici plutot que recalcule depuis la base).
+      C'est la methodologie du "tableau d'equilibre" officiel du budget de
+      l'Etat: les PSR sont des sommes retrocedees, presentees en deduction
+      des recettes brutes plutot qu'additionnees a elles. Vaut 0.0 par
+      defaut (aucun PSR a deduire) - notamment pour un run partiel
+      (`--depenses-only`) qui ne recalcule pas les PSR de l'annee: dans ce
+      cas `recettes_nettes` n'est PAS reactualise avec le PSR le plus
+      recent, il reste celui du dernier run ayant traite les recettes de
+      cette annee (limitation connue, cf. `api.etl.run`).
     - `deficit` = depenses_nettes - recettes_nettes: c'est le deficit
       budgetaire de l'Etat (recettes - depenses du budget general), PAS le
       deficit "Maastricht" au sens INSEE (perimetre plus large incluant les
@@ -240,11 +259,15 @@ async def recalculer_annee_budget(
             select(func.coalesce(func.sum(Depense.cp), 0)).where(Depense.annee == annee)
         )
     )
-    recettes_total = float(
+    recettes_brutes = float(
         await db.scalar(
             select(func.coalesce(func.sum(Recette.montant_net), 0)).where(Recette.annee == annee)
         )
     )
+    # Methodologie du tableau d'equilibre officiel du budget de l'Etat:
+    # recettes_nettes = (recettes fiscales + non fiscales) - PSR (voir
+    # docstring ci-dessus et `normalize.PrelevementsSurRecettes`).
+    recettes_total = recettes_brutes - prelevements_sur_recettes
     deficit = depenses_total - recettes_total
 
     stmt = pg_insert(AnneeBudget).values(
@@ -271,9 +294,12 @@ async def recalculer_annee_budget(
     result = await db.execute(select(AnneeBudget).where(AnneeBudget.annee == annee))
     annee_budget = result.scalar_one()
     logger.info(
-        "annee %d: annee_budget recalcule (depenses=%.0f, recettes=%.0f, deficit=%.0f)",
+        "annee %d: annee_budget recalcule (depenses=%.0f, recettes_brutes=%.0f, "
+        "psr_deduits=%.0f, recettes_nettes=%.0f, deficit=%.0f)",
         annee,
         depenses_total,
+        recettes_brutes,
+        prelevements_sur_recettes,
         recettes_total,
         deficit,
     )

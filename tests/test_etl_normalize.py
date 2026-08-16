@@ -16,6 +16,7 @@ from api.etl.normalize import (
     build_mission_alias_rows,
     build_mission_rows,
     clean_montant,
+    extract_prelevements_sur_recettes,
     normalize_depenses_2020,
     normalize_depenses_attachment_detaillee,
     normalize_depenses_records_json,
@@ -228,8 +229,26 @@ def test_normalize_recettes_records_json_mappe_les_codes_connus() -> None:
     assert par_type[TypeRecette.IS] == [pytest.approx(70000000000.0)]
     assert par_type[TypeRecette.TVA] == [pytest.approx(100000000000.0)]
     assert par_type[TypeRecette.TICPE] == [pytest.approx(15000000000.0)]
-    # codes 1303 et 3119 (non references) tombent dans AUTRES
-    assert len(par_type[TypeRecette.AUTRES]) == 2
+    # code 1303 (non reference) tombe dans AUTRES; le code 3119 est une
+    # ligne PSR ("Prelevements sur les recettes...collectivites
+    # territoriales") et ne doit PAS apparaitre du tout dans les records.
+    assert len(par_type[TypeRecette.AUTRES]) == 1
+
+
+def test_normalize_recettes_records_json_exclut_les_lignes_psr() -> None:
+    """Les lignes PSR (type_de_recettes commencant par "Prelevement") ne sont pas
+    des recettes: elles ne doivent jamais atterrir dans `recette` (dont le
+    `type` IR/TVA/IS/TICPE/AUTRES n'a pas de sens pour un prelevement
+    reverse aux collectivites/UE).
+    """
+    raw = _load_json("recettes_2025_sample.json")
+    records = normalize_recettes_records_json(raw, 2025)
+
+    # 5 lignes "Recettes fiscales" dans la fixture, 1 ligne PSR exclue
+    assert len(records) == 5
+    assert sum(r.montant for r in records) == pytest.approx(
+        90000000000.0 + 70000000000.0 + 100000000000.0 + 15000000000.0 + 305000000.0
+    )
 
 
 def test_aggregate_recettes_somme_par_type_brut_egal_net() -> None:
@@ -240,8 +259,44 @@ def test_aggregate_recettes_somme_par_type_brut_egal_net() -> None:
     par_type = {a.type: a for a in aggregats}
     assert len(aggregats) == 5  # IR, IS, TVA, TICPE, AUTRES
     autres = par_type[TypeRecette.AUTRES]
-    assert autres.montant_net == pytest.approx(305000000.0 - 1000000000.0)
+    assert autres.montant_net == pytest.approx(305000000.0)
     assert autres.montant_brut == autres.montant_net
+
+
+# ---------------------------------------------------------------------------
+# Recettes: prelevements sur recettes (PSR) - methodologie tableau d'equilibre
+# ---------------------------------------------------------------------------
+
+
+def test_extract_prelevements_sur_recettes_isole_collectivites_et_ue() -> None:
+    """Chiffres proches de l'exemple 2025 reel (recettes-du-budget-general PLF25):
+    fiscales ~500,35 Md, non fiscales ~20,55 Md, PSR collectivites ~44,19 Md,
+    PSR UE ~23,32 Md -> recettes_nettes ~453,4 Md.
+    """
+    raw = _load_json("recettes_2025_psr_sample.json")
+    psr = extract_prelevements_sur_recettes(raw, 2025)
+
+    assert psr.collectivites == pytest.approx(44188897951.0)
+    assert psr.union_europeenne == pytest.approx(23320855052.0)
+    assert psr.total == pytest.approx(44188897951.0 + 23320855052.0)
+
+
+def test_normalize_recettes_records_json_psr_sample_exclut_bien_les_psr() -> None:
+    raw = _load_json("recettes_2025_psr_sample.json")
+    records = normalize_recettes_records_json(raw, 2025)
+
+    # Seules les 3 lignes "Recettes fiscales"/"Recettes non fiscales" restent
+    # (les 2 lignes PSR - collectivites et UE - sont exclues).
+    assert len(records) == 3
+    recettes_budgetaires = sum(r.montant for r in records)
+    assert recettes_budgetaires == pytest.approx(500349453469.0 + 20548548212.0)
+
+    psr = extract_prelevements_sur_recettes(raw, 2025)
+    recettes_nettes = recettes_budgetaires - psr.total
+    # ~453,4 Md EUR, coherent avec les ordres de grandeur officiels du
+    # deficit budgetaire 2025 une fois compare aux depenses (~594 Md).
+    assert recettes_nettes == pytest.approx(453388248678.0)
+    assert recettes_nettes / 1e9 == pytest.approx(453.4, abs=0.1)
 
 
 # ---------------------------------------------------------------------------
