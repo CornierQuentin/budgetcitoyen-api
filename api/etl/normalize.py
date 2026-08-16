@@ -284,43 +284,116 @@ def build_mission_alias_rows(
 # ---------------------------------------------------------------------------
 
 
+def _format_code(value: Any) -> str:
+    """Normalise un code source qui peut arriver en str ou en float (JSON).
+
+    L'API renvoie certains codes numeriques (ex: programme) en JSON comme
+    nombre flottant (ex: 166.0) plutot que comme chaine ("166"): on les
+    reconvertit en entier avant stringification pour eviter le suffixe
+    ".0".
+    """
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
 def normalize_depenses_records_json(
     records: list[dict[str, Any]], annee: int
 ) -> list[DepenseRecord]:
     """Normalise les enregistrements de l'API records (2019, 2023-2025).
 
-    Detecte le sous-format via la cle 'typebudget' (2023-2025, code 2
-    lettres pour la mission) ou 'type_de_budget_hors_budgets_annexes' (2019,
-    codes separes 'code_mission'/'code_programme'/'code_action'). Seul le
-    perimetre "budget general" (BG) est retenu, coherent avec les recettes
-    qui elles aussi ne couvrent que le budget general.
+    Ce portail n'expose PAS un format JSON uniforme pour 2023-2025: seul le
+    dataset "*-selon-destination" (2025, et son equivalent "plf24" s'il
+    existait) suit le format "propre" documente dans le CDC. Les datasets
+    2023 ("credits-ae-et-cp-votes...") et 2024
+    ("plf-2024-depenses-2024-selon-nomenclatures-destination-et-nature")
+    suivent en realite un schema plus proche des fichiers CSV "detaillee"
+    (constate a l'execution reelle, corrige ici par rapport a l'hypothese
+    initiale du CDC qui supposait a tort un schema identique a 2025):
+
+    - 2025 ("selon-destination"): cle `typebudget`, codes `mission`/
+      `programme`/`action` deja au format canonique ("103-01" pour action),
+      montants `autorisation_engagement`/`credit_de_paiement`.
+    - 2019: cle `type_de_budget_hors_budgets_annexes` (valeur texte "Budget
+      général"), codes separes `code_mission`/`code_programme`/
+      `code_action` (action non prefixee par le programme), montants
+      `ae_lfi_2019`/`cp_lfi_2019`.
+    - 2024: cle `type_mission`, `code_mission` separe, `programme` en
+      nombre (ex 224.0), `action` non prefixee, montants `ae_plf`/`cp_plf`
+      (pas de decomposition T2/HT2 exposee pour cette annee).
+    - 2023: cle `type_mission`, `code_mission` separe, `programme` en
+      nombre, `action` non prefixee. Les colonnes calculees
+      `ae_t2_hors_t2_lfi_2023`/`cp_t2_hors_t2_lfi_2023` cense fournir le
+      total T2+HT2 se sont averees cassees a l'execution reelle (valeur
+      constante 4.0 sur toutes les lignes, quelle que soit la mission): le
+      montant est donc recalcule ici comme PLF + amendements
+      (`*_plf_2023` + `*_amendements_2023`, T2 et hors T2), qui correspond
+      a la definition de la LFI votee.
+
+    Dans tous les cas, seul le perimetre "budget general" (BG) est retenu,
+    coherent avec les recettes qui elles aussi ne couvrent que le budget
+    general.
     """
     out: list[DepenseRecord] = []
     for row in records:
-        if "typebudget" in row:  # 2023-2025
+        if "typebudget" in row:  # 2025 "selon-destination"
             if row.get("typebudget") != "BG":
                 continue
             mission_code = row["mission"]
             mission_libelle = row["libelle_mission"]
-            programme_code = row["programme"]
+            programme_code = _format_code(row["programme"])
             programme_libelle = row["libelle_programme"]
             action_code = row["action"]
             action_libelle = row["libelle_action"]
             ae = clean_montant(row.get("autorisation_engagement"))
             cp = clean_montant(row.get("credit_de_paiement"))
-        else:  # 2019
+        elif "type_de_budget_hors_budgets_annexes" in row:  # 2019
             if row.get("type_de_budget_hors_budgets_annexes") != "Budget général":
                 continue
             mission_code = row["code_mission"]
             mission_libelle = row["mission"]
-            programme_code = row["code_programme"]
+            programme_code = _format_code(row["code_programme"])
             programme_libelle = row["programme"]
             # Uniformise le format du code action ("PPP-AA") avec les autres
             # generations de source, qui prefixent deja par le code programme.
-            action_code = f"{row['code_programme']}-{row['code_action']}"
+            action_code = f"{programme_code}-{row['code_action']}"
             action_libelle = row["action"]
             ae = clean_montant(row.get("ae_lfi_2019"))
             cp = clean_montant(row.get("cp_lfi_2019"))
+        elif "type_mission" in row:  # 2023-2024, schema "detaillee"-like
+            if row.get("type_mission") != "BG":
+                continue
+            mission_code = row["code_mission"]
+            mission_libelle = row["mission"]
+            programme_code = _format_code(row["programme"])
+            programme_libelle = row["libelle_programme"]
+            action_code = f"{programme_code}-{row['action']}"
+            action_libelle = row["libelle_action"]
+            if "ae_plf" in row:  # 2024: pas de decomposition T2/HT2 exposee
+                ae = clean_montant(row.get("ae_plf"))
+                cp = clean_montant(row.get("cp_plf"))
+            else:
+                # 2023: les colonnes calculees "*_lfi_2023" (et "check_*")
+                # sont un champ casse cote source: elles valent
+                # systematiquement 4.0 (ou 0.0) quelle que soit la ligne,
+                # constate a l'execution reelle. Le montant LFI est donc
+                # recalcule ici comme PLF + amendements (T2 + hors T2), ce
+                # qui correspond a la definition de la LFI votee (texte du
+                # PLF tel qu'amende en cours de discussion parlementaire).
+                ae = (
+                    clean_montant(row.get("ae_t2_plf_2023"))
+                    + clean_montant(row.get("ae_hors_t2_plf_2023"))
+                    + clean_montant(row.get("ae_t2_amendements_2023"))
+                    + clean_montant(row.get("ae_hors_t2_amendements_2023"))
+                )
+                cp = (
+                    clean_montant(row.get("cp_t2_plf_2023"))
+                    + clean_montant(row.get("cp_hors_t2_plf_2023"))
+                    + clean_montant(row.get("cp_t2_amendements_2023"))
+                    + clean_montant(row.get("cp_hors_t2_amendements_2023"))
+                )
+        else:
+            raise ValueError(f"Format JSON depenses non reconnu pour l'annee {annee}: {row!r}")
 
         out.append(
             DepenseRecord(

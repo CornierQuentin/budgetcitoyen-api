@@ -119,6 +119,46 @@ def test_normalize_depenses_records_json_2019_filtre_et_prefixe_action() -> None
     assert aggregats[0].cp == pytest.approx(183844 + 16156)
 
 
+def test_normalize_depenses_records_json_2023_ignore_champ_lfi_casse() -> None:
+    """Le dataset 2023 suit un schema proche du CSV "detaillee", pas du JSON 2025.
+
+    Ses colonnes calculees `*_lfi_2023` valent une constante 4.0 sur toutes
+    les lignes (bug constate cote source): le montant doit etre recalcule a
+    partir de PLF + amendements, pas lu depuis ces colonnes cassees.
+    """
+    raw = _load_json("depenses_2023_sample.json")
+    records = normalize_depenses_records_json(raw, 2023)
+
+    # 2 lignes BG (Justice), 1 ligne CCF exclue
+    assert len(records) == 2
+    assert all(r.mission_code == "JA" for r in records)
+    assert all(r.action_code == "166-05" for r in records)
+    # Aucune valeur ne doit provenir du champ casse (toujours 4.0 en source)
+    assert all(r.ae != 4.0 for r in records)
+
+    aggregats = aggregate_depenses(records)
+    assert len(aggregats) == 1
+    assert aggregats[0].ae == pytest.approx(1000000.0 + 55000.0)
+    assert aggregats[0].cp == pytest.approx(1000000.0 + 55000.0)
+    assert aggregats[0].programme_code == "166"
+
+
+def test_normalize_depenses_records_json_2024_schema_ae_plf() -> None:
+    """Le dataset 2024 utilise ae_plf/cp_plf (pas de decomposition T2/HT2)."""
+    raw = _load_json("depenses_2024_sample.json")
+    records = normalize_depenses_records_json(raw, 2024)
+
+    # 2 lignes BG (Culture), 1 ligne BA exclue
+    assert len(records) == 2
+    assert all(r.mission_code == "CB" for r in records)
+    assert all(r.action_code == "224-07" for r in records)
+
+    aggregats = aggregate_depenses(records)
+    assert len(aggregats) == 1
+    assert aggregats[0].ae == pytest.approx(76099174.0 + 5000000.0)
+    assert aggregats[0].cp == pytest.approx(74172725.0 + 5000000.0)
+
+
 # ---------------------------------------------------------------------------
 # Depenses 2020: double fichier a joindre
 # ---------------------------------------------------------------------------

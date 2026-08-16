@@ -1,0 +1,59 @@
+{
+  "total_count": 3,
+  "results": [
+    {
+      "type_mission": "BG",
+      "mission": "Culture",
+      "code_mission": "CB",
+      "programme": 224.0,
+      "libelle_programme": "Soutien aux politiques du ministère de la culture",
+      "action": "07",
+      "libelle_action": "Fonctions de soutien du ministère",
+      "sous_action": null,
+      "libelle_sousaction": null,
+      "categorie": 31.0,
+      "code_titre": "3",
+      "ae_plf": 76099174.0,
+      "cp_plf": 74172725.0,
+      "ae_prev_fdc_adp": 0.0,
+      "cp_prev_fdc_adp": 1000000.0,
+      "ministere": "Culture"
+    },
+    {
+      "type_mission": "BG",
+      "mission": "Culture",
+      "code_mission": "CB",
+      "programme": 224.0,
+      "libelle_programme": "Soutien aux politiques du ministère de la culture",
+      "action": "07",
+      "libelle_action": "Fonctions de soutien du ministère",
+      "sous_action": null,
+      "libelle_sousaction": null,
+      "categorie": 61.0,
+      "code_titre": "6",
+      "ae_plf": 5000000.0,
+      "cp_plf": 5000000.0,
+      "ae_prev_fdc_adp": 0.0,
+      "cp_prev_fdc_adp": 0.0,
+      "ministere": "Culture"
+    },
+    {
+      "type_mission": "BA",
+      "mission": "Controle et exploitation aeriens",
+      "code_mission": "ZZ",
+      "programme": 612.0,
+      "libelle_programme": "Programme hors budget general",
+      "action": "01",
+      "libelle_action": "Action hors perimetre",
+      "sous_action": null,
+      "libelle_sousaction": null,
+      "categorie": 31.0,
+      "code_titre": "3",
+      "ae_plf": 999.0,
+      "cp_plf": 999.0,
+      "ae_prev_fdc_adp": 0.0,
+      "cp_prev_fdc_adp": 0.0,
+      "ministere": "Transports"
+    }
+  ]
+}

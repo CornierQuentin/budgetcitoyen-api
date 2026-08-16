@@ -29,6 +29,20 @@ from api.models.recette import Recette
 
 logger = logging.getLogger(__name__)
 
+# Largeur des colonnes String(255) portant des libelles (mission/programme/
+# action/alias). Une poignee de libelles legaux reels depassent 255
+# caracteres (ex: intitules de programmes de compensation tres detailles):
+# on tronque plutot que d'elargir le schema, hors perimetre de cette passe.
+_LIBELLE_MAX_LEN = 255
+
+
+def _tronque(texte: str, max_len: int = _LIBELLE_MAX_LEN) -> str:
+    """Tronque un libelle a la largeur de la colonne, en le signalant si besoin."""
+    if len(texte) <= max_len:
+        return texte
+    logger.warning("libelle tronque a %d caracteres: %r", max_len, texte)
+    return texte[:max_len]
+
 
 async def upsert_missions(
     db: AsyncSession, rows: Sequence[MissionYearRow]
@@ -42,6 +56,13 @@ async def upsert_missions(
 
     values = [
         {
+            # slug/nom_normalise/nom_officiel ne sont volontairement pas
+            # tronques ici: leur valeur exacte (non tronquee) est la cle de
+            # correlation utilisee par l'appelant pour resoudre mission_id
+            # (cf. `run.py`); une troncature cote loader casserait ce
+            # rapprochement. En pratique les libelles de mission observes
+            # restent bien en-deca de 255 caracteres (contrairement a
+            # certains libelles de programme/action, tronques ci-dessous).
             "slug": r.slug,
             "nom_normalise": r.nom_normalise,
             "nom_officiel": r.nom_officiel,
@@ -80,7 +101,7 @@ async def upsert_mission_aliases(
         return
     values = [
         {
-            "nom_csv": alias.nom_csv,
+            "nom_csv": _tronque(alias.nom_csv),
             "mission_id": mission_id,
             "annee_debut": alias.annee_debut,
             "annee_fin": alias.annee_fin,
@@ -116,7 +137,7 @@ async def upsert_depenses(
         programme_libelles[(mission_id, agg.programme_code)] = agg.programme_libelle
 
     programme_values = [
-        {"mission_id": mission_id, "code": code, "nom": nom, "annee": annee}
+        {"mission_id": mission_id, "code": code, "nom": _tronque(nom), "annee": annee}
         for (mission_id, code), nom in programme_libelles.items()
     ]
     result = await db.execute(
@@ -131,7 +152,7 @@ async def upsert_depenses(
         action_libelles[(programme_id, agg.action_code)] = agg.action_libelle
 
     action_values = [
-        {"programme_id": programme_id, "code": code, "nom": nom, "annee": annee}
+        {"programme_id": programme_id, "code": code, "nom": _tronque(nom), "annee": annee}
         for (programme_id, code), nom in action_libelles.items()
     ]
     result = await db.execute(
