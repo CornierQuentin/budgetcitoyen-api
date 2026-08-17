@@ -68,3 +68,13 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+# SQLAlchemy's async ORM bridges its (synchronous) query compilation/execution
+# machinery into async code via `greenlet_spawn` (see sqlalchemy.util._concurrency_py3k).
+# Without `concurrency = greenlet`, coverage.py silently loses line tracking for
+# any code executed after the first `await session.execute(...)` in a coroutine
+# reached via a live ASGI request (FastAPI route -> service -> `db.execute`) even
+# though it runs correctly - this made real coverage look far lower than it is
+# (measured +4pts backend-wide the moment this was added, with no new tests).
+concurrency = ["greenlet", "thread"]
