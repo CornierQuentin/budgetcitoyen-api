@@ -1,6 +1,6 @@
 """Endpoint de simulation de budget personnel."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from api.db.deps import DbSession
 from api.schemas.budget_perso import BudgetPersoResponse
@@ -10,5 +10,7 @@ router = APIRouter(prefix="/budget-perso", tags=["budget-perso"])
 
 
 @router.get("", response_model=BudgetPersoResponse)
-async def obtenir_budget_perso(revenu_net: float, db: DbSession) -> BudgetPersoResponse:
+async def obtenir_budget_perso(
+    db: DbSession, revenu_net: float = Query(..., ge=0)
+) -> BudgetPersoResponse:
     return await budget_perso_service.calculer_budget_perso(revenu_net, db)
