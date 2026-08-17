@@ -26,6 +26,15 @@ async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
     defaut garderait des connexions asyncpg attachees a un loop deja ferme.
     """
     settings = get_settings()
+    db_name = settings.database_url.rsplit("/", 1)[-1]
+    if "test" not in db_name.lower():
+        raise RuntimeError(
+            f"DATABASE_URL pointe vers '{db_name}', qui ne contient pas 'test'. "
+            "Ce fixture fait un DROP de toutes les tables en teardown : lancer les "
+            "tests contre la base de dev (docker-compose, 'budgetcitoyen') detruirait "
+            "les vraies donnees ingerees. Utilise une base dediee, ex. "
+            "'budgetcitoyen_test' (meme convention que la CI, voir .github/workflows/ci.yml)."
+        )
     engine = create_async_engine(settings.database_url, poolclass=NullPool)
 
     async with engine.begin() as conn:
