@@ -1,21 +1,27 @@
 """Normalisation des donnees brutes issues des sources ETL vers une structure
 intermediaire commune, independante du format source.
 
-Le portail data.economie.gouv.fr expose les "depenses" sous 4 generations de
-format selon l'annee (voir `api.etl.sources` pour le detail); ce module
-fournit un normaliseur par sous-format, tous convergeant vers `DepenseRecord`
-puis `DepenseAggregat` (une ligne par triplet mission/programme/action, AE/CP
-sommes). Les "recettes" convergent vers `RecetteRecord` / `RecetteAggregat`.
+Le portail data.economie.gouv.fr expose les "depenses" sous plusieurs
+generations de format selon l'annee (voir `api.etl.sources` pour le detail);
+ce module fournit un normaliseur par sous-format, tous convergeant vers
+`DepenseRecord` puis `DepenseAggregat` (une ligne par triplet
+mission/programme/action, AE/CP sommes). Les "recettes" convergent vers
+`RecetteRecord` / `RecetteAggregat`.
 
 Resolution d'identite des missions
 -----------------------------------
 Le libelle d'une mission peut changer d'une annee sur l'autre (ex: fusion,
 renommage de ministere) alors que la mission logique reste la meme. La cle de
 rapprochement prioritaire est `code_mission` (code LOLF a 2 lettres, stable
-dans le temps sur tout notre perimetre 2019-2025). A defaut de code (formats
-source plus anciens, hors perimetre de cette passe), on retombe sur le slug
-du libelle courant comme cle de secours - chaque variante sans code forme
-alors sa propre mission logique.
+dans le temps sur tout notre perimetre 2018-2025). A defaut de code (2016 et
+2017, cf. `normalize_depenses_2016`/`normalize_depenses_2017`: ces
+millesimes n'exposent qu'un libelle mission texte, pas de code), on retombe
+sur le slug du libelle courant comme cle de secours - chaque variante sans
+code forme alors sa propre mission logique. Le slug etant calcule a partir
+du TEXTE du libelle (independamment de la presence d'un code), il reste
+neanmoins souvent identique a celui deja retenu pour 2018+ (meme cle
+naturelle de rapprochement) tant que l'intitule de la mission n'a pas change
+d'un millesime a l'autre.
 
 Le "libelle canonique" d'une mission logique (utilise pour `nom_normalise`
 et pour calculer son `slug`) est celui de l'annee la plus recente ou elle a
@@ -431,6 +437,135 @@ def normalize_depenses_records_json(
                 programme_code=programme_code,
                 programme_libelle=programme_libelle,
                 action_code=action_code,
+                action_libelle=action_libelle,
+                ae=ae,
+                cp=cp,
+            )
+        )
+    return out
+
+
+def normalize_depenses_2016(csv_text: str, annee: int = 2016) -> list[DepenseRecord]:
+    """Normalise le format 2016: piece jointe "BG-Action_Titre" dediee (BG only).
+
+    A la difference de 2018+ (fichier unique BG+CAS+CCF fusionne, filtre par
+    une colonne 'Type de Budget'/'Type Mission'), le portail expose ici un
+    fichier PAR perimetre budgetaire (BG/CAS/CCF sont 3 pieces jointes
+    distinctes du meme dataset, cf. `api.etl.sources.
+    DEPENSES_ATTACHMENT_IDS[2016]`): le filtrage BG est donc fait en amont,
+    par le CHOIX de la piece jointe (celle-ci), pas par une colonne a
+    l'interieur du fichier - il n'y en a pas.
+
+    3 lignes d'en-tete parasites precedent la vraie ligne de colonnes
+    ("Gestion;2016;...", "Type Budget;Budget general;...", une ligne
+    quasi-vide portant juste un marqueur "Donnees") - `lignes[4:]` les saute
+    pour atteindre les donnees (la ligne de colonnes elle-meme, `lignes[3]`,
+    n'est pas utilisee: les colonnes sont adressees par position, pas par
+    nom, cf. ci-dessous).
+
+    Colonnes reelles (piece "Action_Titre", verifiees a l'inspection reelle
+    aout 2026): Mission;Programme;Action;Libelle action;Titre;AELF 2015;
+    AEPLF;AEAMT;AELF;CPLF 2015;CPPLF;CPAMT;CPLF. Pas de code mission (le
+    'Mission' est un libelle texte brut) ni de libelle programme: seul
+    `mission_libelle` est exploitable comme texte, `programme_libelle` est
+    donc replie sur le code programme lui-meme (aucune autre piece jointe du
+    dataset ne fournit de nomenclature programme separee - verifie a
+    l'inspection reelle des 18 pieces jointes du dataset 2016) - cf. le
+    docstring du module sur la resolution d'identite par slug quand
+    `code_mission` est absent. `Titre` (T2/T3/T5/T6/T7...) est une
+    decomposition plus fine que l'action, comme la 'Categorie' des autres
+    formats: plusieurs lignes Titre pour une meme action sont sommees par
+    `aggregate_depenses`; seule la PREMIERE ligne Titre d'une action porte
+    'Libelle action' (les suivantes l'ont vide, artefact d'export en
+    cellules fusionnees) - verifie exhaustivement a l'inspection reelle (575
+    actions distinctes, 0 libelle vide sur la premiere occurrence): sans
+    risque donc de laisser `action_libelle` vide, la logique de merge de
+    `aggregate_depenses` (garde les libelles de la premiere ligne rencontree
+    pour une cle donnee) suffit, un repli sur le code n'est prevu que par
+    securite si jamais elle etait vide.
+
+    Colonne montant retenue: 'AELF'/'CPLF' (derniere colonne de chaque bloc,
+    LFI VOTEE finale) - PAS 'AELF 2015' (LFI de l'annee precedente, un
+    simple repere historique), 'AEPLF' (avant-projet) ni 'AEAMT'
+    (amendements seuls, deja inclus dans le montant final).
+    """
+    lignes = list(csv.reader(io.StringIO(csv_text), delimiter=";"))
+    out: list[DepenseRecord] = []
+    for row in lignes[4:]:
+        if len(row) < 13 or not row[0].strip():
+            continue
+        mission_libelle = row[0]
+        programme_code = row[1]
+        action_code_brut = row[2]
+        action_libelle = row[3] or action_code_brut
+        # row[4] = code Titre (T2/T3/...), decomposition plus fine que
+        # l'action, volontairement ignoree ici (sommee via aggregate_depenses).
+        ae = clean_montant(row[8])
+        cp = clean_montant(row[12])
+        out.append(
+            DepenseRecord(
+                annee=annee,
+                mission_code="",
+                mission_libelle=mission_libelle,
+                programme_code=programme_code,
+                programme_libelle=programme_code,
+                action_code=f"{programme_code}-{action_code_brut}",
+                action_libelle=action_libelle,
+                ae=ae,
+                cp=cp,
+            )
+        )
+    return out
+
+
+def normalize_depenses_2017(csv_text: str, annee: int = 2017) -> list[DepenseRecord]:
+    """Normalise le format 2017: piece jointe "BG-Action_Categorie" dediee (BG only).
+
+    Meme principe que 2016 (`normalize_depenses_2016`) pour le filtrage BG:
+    une piece jointe dediee par perimetre budgetaire, pas de colonne a
+    filtrer dans le fichier lui-meme. Contrairement a 2016, PAS de lignes
+    d'en-tete parasites: la premiere ligne est directement la ligne de
+    colonnes.
+
+    Colonnes reelles (verifiees a l'inspection reelle aout 2026): ANNEE;
+    Mission;Programme;Libelle;Action;Libelle;Categorie;Libelle;AE-LF_N1;
+    AE-PLF;AE-AMT;AE-LF;CP-LF_N1;CP-PLF;CP-AMT;CP-LF. Le libelle 'Libelle'
+    est REPETE 3 fois (programme/action/categorie): `csv.DictReader`
+    collapserait ces 3 colonnes en une seule cle (dict, cle dupliquee =
+    derniere valeur gagne), perdant les libelles programme et action - le
+    parsing se fait donc par INDICE de colonne (`csv.reader`), pas par nom.
+    A la difference de 2016, ce format fournit un vrai libelle programme
+    (colonne 3): `programme_libelle` n'a donc pas besoin de repli sur le
+    code ici. 'Categorie' (colonnes 6/7) est une decomposition plus fine que
+    l'action (comme 'Titre' en 2016): plusieurs lignes Categorie pour une
+    meme action sont sommees par `aggregate_depenses`.
+
+    Colonne montant retenue: 'AE-LF'/'CP-LF' (derniere colonne de chaque
+    bloc, LFI VOTEE finale) - PAS 'AE-LF_N1' (LFI annee precedente),
+    'AE-PLF' (avant-projet) ni 'AE-AMT' (amendements seuls).
+    """
+    lignes = list(csv.reader(io.StringIO(csv_text), delimiter=";"))
+    out: list[DepenseRecord] = []
+    for row in lignes[1:]:
+        if len(row) < 16 or not row[1].strip():
+            continue
+        mission_libelle = row[1]
+        programme_code = row[2]
+        programme_libelle = row[3]
+        action_code_brut = row[4]
+        action_libelle = row[5]
+        # row[6]/row[7] = code/libelle Categorie, decomposition plus fine
+        # que l'action, volontairement ignoree ici (sommee via aggregate_depenses).
+        ae = clean_montant(row[11])
+        cp = clean_montant(row[15])
+        out.append(
+            DepenseRecord(
+                annee=annee,
+                mission_code="",
+                mission_libelle=mission_libelle,
+                programme_code=programme_code,
+                programme_libelle=programme_libelle,
+                action_code=f"{programme_code}-{action_code_brut}",
                 action_libelle=action_libelle,
                 ae=ae,
                 cp=cp,

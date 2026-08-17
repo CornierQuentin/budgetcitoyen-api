@@ -4,6 +4,16 @@ Portail source: data.economie.gouv.fr (OpenDataSoft v2.1). Le format des
 donnees "depenses" change de generation selon l'annee - voir DEPENSES_DATASETS
 et le docstring de chaque normaliseur dans `api.etl.normalize`:
 
+- 2016: piece jointe dediee "BG-Action_Titre" (un fichier par perimetre
+  budgetaire BG/CAS/CCF au sein du dataset, filtrage BG donc fait par le
+  CHOIX de la piece jointe, pas par une colonne interne); 3 lignes d'en-tete
+  parasites avant la ligne de colonnes; pas de code mission ni de libelle
+  programme (repli sur le code).
+- 2017: piece jointe dediee "BG-Action_Categorie" (meme principe de
+  filtrage BG que 2016 par le choix de la piece jointe); pas de lignes
+  d'en-tete parasites mais colonne 'Libelle' repetee 3x (programme/
+  action/categorie), parsee par indice plutot que par nom; pas de code
+  mission mais un vrai libelle programme, contrairement a 2016.
 - 2018: un seul fichier CSV en piece jointe, BG+CAS+CCF deja fusionnes dans
   un meme fichier (filtre sur 'Type de Budget (Hors Budgets annexes)' ==
   'Budget général', comme 2019), montants finaux directs (pas de
@@ -12,6 +22,13 @@ et le docstring de chaque normaliseur dans `api.etl.normalize`:
 - 2020: deux fichiers CSV en piece jointe (nomenclature + credits) a joindre.
 - 2021-2022: un seul fichier CSV "detaillee" en piece jointe (libelles inclus).
 - 2023-2025: API records JSON "propre" (colonnes stables entre les 3 annees).
+
+Toutes les annees (2016-2025) ne retiennent que le budget general (BG),
+jamais les comptes d'affectation speciale (CAS) ni les comptes de concours
+financiers (CCF), pour rester comparables entre elles - meme quand les
+fichiers CAS/CCF existent et seraient techniquement sommables (2016-2017
+notamment: sommer BG+CAS+CCF romprait la coherence de perimetre avec
+2018-2025, deja tous en BG seul).
 
 Les recettes ("recettes du budget general") ne sont disponibles sous forme
 structuree que pour 2024 et 2025 sur ce portail (verifie par recherche
@@ -46,10 +63,12 @@ DEPENSES_DATASETS_RECORDS: dict[int, str] = {
     2025: "plf25-depenses-2025-selon-destination",
 }
 
-# Depenses: datasets a pieces jointes (attachments) pour 2018 et 2020-2022,
-# dont il faut resoudre dynamiquement l'URL exacte via l'endpoint catalog
-# dataset.
+# Depenses: datasets a pieces jointes (attachments) pour 2016-2018 et
+# 2020-2022, dont il faut resoudre dynamiquement l'URL exacte via l'endpoint
+# catalog dataset.
 DEPENSES_DATASETS_ATTACHMENTS: dict[int, str] = {
+    2016: "loi-de-finances-initiale-pour-2016-lfi-2016",
+    2017: "loi-de-finances-initiale-pour-2017-lfi-2017",
     2018: "loi-de-finances-initiale-pour-2018-lfi-2018",
     2020: "projet-de-loi-de-finances-initiale-pour-2020-lfi-2020",
     2021: "projet-de-loi-de-finances-initiale-pour-2021-lfi-2021",
@@ -57,8 +76,19 @@ DEPENSES_DATASETS_ATTACHMENTS: dict[int, str] = {
 }
 
 # Identifiants des pieces jointes CSV a utiliser au sein de chaque dataset
-# 2018/2020-2022 (2020: deux fichiers a joindre : nomenclature + credits).
+# 2016-2018/2020-2022 (2020: deux fichiers a joindre : nomenclature +
+# credits). 2016/2017: un seul des deux decoupages BG alternatifs
+# (Action_Categorie vs Action_Titre - memes totaux, juste une decomposition
+# fine differente) est retenu par annee, celui qui expose le plus de
+# libelles exploitables tel quel - cf. `api.etl.normalize.
+# normalize_depenses_2016`/`normalize_depenses_2017`.
 DEPENSES_ATTACHMENT_IDS: dict[int, dict[str, str]] = {
+    2016: {
+        "detaillee": "lfi2016_bg_action_titre_csv",
+    },
+    2017: {
+        "detaillee": "lfi2017_bg_action_categorie_csv",
+    },
     2018: {
         "detaillee": "lfi_2018_act_cat_tit_bg_cas_ccf_csv",
     },
@@ -75,7 +105,18 @@ DEPENSES_ATTACHMENT_IDS: dict[int, dict[str, str]] = {
 }
 
 # Toutes les annees de depenses couvertes par cette passe d'ingestion.
-DEPENSES_ANNEES: tuple[int, ...] = (2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025)
+DEPENSES_ANNEES: tuple[int, ...] = (
+    2016,
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024,
+    2025,
+)
 
 # --------------------------------------------------------------------------
 # Recettes: seules 2024 et 2025 disposent d'un dataset "recettes du budget
@@ -294,7 +335,7 @@ def default_depenses_source_url(annee: int) -> str | None:
     if annee == 2020:
         dataset_id = DEPENSES_DATASETS_ATTACHMENTS[2020]
         return attachment_url(dataset_id, DEPENSES_ATTACHMENT_IDS[2020]["credits"])
-    if annee in (2018, 2021, 2022):
+    if annee in (2016, 2017, 2018, 2021, 2022):
         dataset_id = DEPENSES_DATASETS_ATTACHMENTS[annee]
         return attachment_url(dataset_id, DEPENSES_ATTACHMENT_IDS[annee]["detaillee"])
     return None

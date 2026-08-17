@@ -18,6 +18,8 @@ from api.etl.normalize import (
     clean_montant,
     extract_non_fiscal_et_psr_cour_des_comptes,
     extract_prelevements_sur_recettes,
+    normalize_depenses_2016,
+    normalize_depenses_2017,
     normalize_depenses_2018,
     normalize_depenses_2020,
     normalize_depenses_attachment_detaillee,
@@ -172,6 +174,90 @@ def test_normalize_depenses_records_json_2024_schema_ae_plf() -> None:
     assert len(aggregats) == 1
     assert aggregats[0].ae == pytest.approx(76099174.0 + 5000000.0)
     assert aggregats[0].cp == pytest.approx(74172725.0 + 5000000.0)
+
+
+# ---------------------------------------------------------------------------
+# Depenses 2016: piece jointe "BG-Action_Titre" dediee (BG only), 3 lignes
+# d'en-tete parasites, pas de code mission ni de libelle programme
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_depenses_2016_saute_les_lignes_parasites_et_agrege_par_titre() -> None:
+    csv_text = _load_csv_cp1252("lfi2016_bg_action_titre_sample.csv")
+    records = normalize_depenses_2016(csv_text, annee=2016)
+
+    # 3 lignes de donnees dans la fixture (2 lignes Titre pour la meme action
+    # "Action exterieure de l'Etat"/105/1, 1 ligne "Defense"/144/3).
+    assert len(records) == 3
+    assert all(r.annee == 2016 for r in records)
+    # Pas de code mission dans ce format: mission_code reste vide (repli sur
+    # le slug du libelle assure par mission_key/resolve_mission_identities).
+    assert all(r.mission_code == "" for r in records)
+    # Pas de libelle programme dans ce format: replie sur le code programme.
+    assert all(r.programme_libelle == r.programme_code for r in records)
+
+    aggregats = aggregate_depenses(records)
+    par_cle = {(a.mission_code, a.programme_code, a.action_code): a for a in aggregats}
+    # 2 actions distinctes: la 2eme ligne Titre de l'action 105-1 (libelle
+    # vide dans la source, artefact d'export en cellules fusionnees) doit se
+    # sommer dans la MEME action, pas en creer une nouvelle.
+    assert len(aggregats) == 2
+
+    action_exterieure = par_cle[("", "105", "105-1")]
+    assert action_exterieure.ae == pytest.approx(59992865 + 30206166)
+    assert action_exterieure.cp == pytest.approx(59992865 + 30206166)
+    assert action_exterieure.mission_libelle == "Action extérieure de l'État"
+    # Le libelle action ne doit provenir que de la PREMIERE ligne Titre (qui
+    # le porte), pas etre ecrase par la seconde (libelle vide en source).
+    assert action_exterieure.action_libelle == "Coordination de l'action diplomatique"
+
+    defense = par_cle[("", "144", "144-3")]
+    # AE et CP different reellement sur cette ligne (147 956 304 vs 136 969 924).
+    assert defense.ae == pytest.approx(147956304)
+    assert defense.cp == pytest.approx(136969924)
+    assert defense.mission_libelle == "Défense"
+
+
+# ---------------------------------------------------------------------------
+# Depenses 2017: piece jointe "BG-Action_Categorie" dediee (BG only), pas de
+# lignes parasites mais colonne "Libelle" repetee 3x (parsing par indice)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_depenses_2017_parse_par_indice_et_agrege_par_categorie() -> None:
+    csv_text = _load_csv_cp1252("lfi2017_bg_action_categorie_sample.csv")
+    records = normalize_depenses_2017(csv_text, annee=2017)
+
+    # 3 lignes de donnees (2 categories pour la meme action 105-01, 1 ligne
+    # Defense/144-03).
+    assert len(records) == 3
+    assert all(r.annee == 2017 for r in records)
+    assert all(r.mission_code == "" for r in records)
+    # Contrairement a 2016, ce format fournit un vrai libelle programme (pas
+    # de repli sur le code).
+    action_exterieure_records = [r for r in records if r.action_code == "105-01"]
+    assert all(
+        r.programme_libelle == "Action de la France en Europe et dans le monde"
+        for r in action_exterieure_records
+    )
+    assert all(
+        r.action_libelle == "Coordination de l'action diplomatique"
+        for r in action_exterieure_records
+    )
+
+    aggregats = aggregate_depenses(records)
+    par_cle = {(a.mission_code, a.programme_code, a.action_code): a for a in aggregats}
+    assert len(aggregats) == 2
+
+    action_exterieure = par_cle[("", "105", "105-01")]
+    # Colonne "AE-LF"/"CP-LF" (finale votee), pas AE-LF_N1/AE-PLF/AE-AMT.
+    assert action_exterieure.ae == pytest.approx(41516956 + 20378460)
+    assert action_exterieure.cp == pytest.approx(41516956 + 20378460)
+
+    defense = par_cle[("", "144", "144-03")]
+    assert defense.ae == pytest.approx(158238792)
+    assert defense.cp == pytest.approx(139619851)
+    assert defense.programme_libelle == "Environnement et prospective de la politique de défense"
 
 
 # ---------------------------------------------------------------------------
