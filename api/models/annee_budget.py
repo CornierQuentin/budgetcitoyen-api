@@ -13,5 +13,7 @@ class AnneeBudget(Base):
     depenses_nettes: Mapped[float] = mapped_column(Numeric(15, 2))
     recettes_nettes: Mapped[float] = mapped_column(Numeric(15, 2))
     deficit: Mapped[float] = mapped_column(Numeric(15, 2))
-    dette_pib: Mapped[float] = mapped_column(Numeric(5, 2))
+    # Hors perimetre de cette passe d'ingestion (donnees INSEE dette/PIB non
+    # ingerees ici): laisse a None pour toutes les annees chargees.
+    dette_pib: Mapped[float | None] = mapped_column(Numeric(5, 2))
     source_url: Mapped[str] = mapped_column(Text)
