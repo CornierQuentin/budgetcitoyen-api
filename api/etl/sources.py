@@ -4,6 +4,24 @@ Portail source: data.economie.gouv.fr (OpenDataSoft v2.1). Le format des
 donnees "depenses" change de generation selon l'annee - voir DEPENSES_DATASETS
 et le docstring de chaque normaliseur dans `api.etl.normalize`:
 
+- 2012: API records JSON, dataset "dotation BG" deja filtre BG par
+  construction, mais SANS libelle programme/action ni libelle mission
+  autre que du texte brut: deux nomenclatures (mission-programme, filtree
+  BG - fournit un code mission LOLF unique parmi 2012-2014 - et
+  par-destination) sont jointes par code. Voir
+  `api.etl.normalize.normalize_depenses_2012`.
+- 2013: meme famille que 2012 (API records JSON, montants BG par
+  construction), mais AUCUN dataset de nomenclature mission-programme
+  n'existe pour ce millesime: pas de code mission disponible (repli slug).
+  Nomenclature programme + destination jointes separement. Voir
+  `api.etl.normalize.normalize_depenses_2013`.
+- 2014: API records JSON, dataset "dotation BG" avec mission/programme/
+  action DEJA en clair (seuls les libelles programme/action manquent), une
+  seule nomenclature (filtree BG via `type_de_mission`) fournit les deux
+  libelles en une jointure. Colonnes CP typees texte avec separateur de
+  milliers espace (deja gere par `clean_montant` sans modification). Pas de
+  code mission disponible (repli slug). Voir
+  `api.etl.normalize.normalize_depenses_2014`.
 - 2016: piece jointe dediee "BG-Action_Titre" (un fichier par perimetre
   budgetaire BG/CAS/CCF au sein du dataset, filtrage BG donc fait par le
   CHOIX de la piece jointe, pas par une colonne interne); 3 lignes d'en-tete
@@ -63,6 +81,46 @@ DEPENSES_DATASETS_RECORDS: dict[int, str] = {
     2025: "plf25-depenses-2025-selon-destination",
 }
 
+# Depenses 2012-2014: chacune de ces 3 annees necessite un dataset "montants"
+# (deja filtre au budget general par construction, cf. docstring de module)
+# et 1 ou 2 datasets de "nomenclature" (libelles/codes manquants du dataset
+# de montants), tous exposes via l'API records JSON (v2.1) - PAS de piece
+# jointe CSV pour cette generation de sources, contrairement a 2016-2018/
+# 2020-2022. Roles par annee (voir le docstring du normaliseur associe dans
+# `api.etl.normalize` pour le detail de la jointure):
+#
+# - 2012: "montants" (BG, sans libelle programme/action/code mission),
+#   "nomenclature_mission_programme" (code programme -> code mission +
+#   libelle programme, filtre BG parmi les 3 perimetres qu'il expose) et
+#   "nomenclature_destination" (code programme+action -> libelle action,
+#   perimetres melanges mais sans collision de code constatee).
+# - 2013: memes roles "montants"/"nomenclature_destination" que 2012, mais
+#   "nomenclature_programme" (PAS "nomenclature_mission_programme": aucun
+#   dataset equivalent n'existe pour ce millesime - code programme ->
+#   libelle programme SEUL, pas de code mission).
+# - 2014: "montants" (BG, avec mission/programme/action DEJA en clair - donc
+#   pas de nomenclature "programme" separee necessaire) et
+#   "nomenclature_destination" (code programme+action -> libelle programme
+#   ET libelle action en une seule jointure, filtrable BG via
+#   `type_de_mission` - id source avec une vraie typo, "li-2014" et non
+#   "lfi-2014", volontairement conservee telle quelle).
+DEPENSES_DATASETS_2012_2014: dict[int, dict[str, str]] = {
+    2012: {
+        "montants": "lfi-2012-dotation-bg-en-ae-cp-par-mission-programme-action-et-categorie",
+        "nomenclature_mission_programme": "lfi-2012-nomenclature-mission-programme",
+        "nomenclature_destination": "plf-2012-nomenclature-par-destination",
+    },
+    2013: {
+        "montants": "lfi-2013-dotation-bg-en-ae-cp-par-mission-programme-action-et-categorie",
+        "nomenclature_programme": "plf-2013-budget-general-par-mission",
+        "nomenclature_destination": "plf-2013-budget-general-nomenclature-par-destination",
+    },
+    2014: {
+        "montants": "lfi-2014-dotation-bg-en-ae-cp-par-action-categorie",
+        "nomenclature_destination": "li-2014-nomenclature-par-destination",
+    },
+}
+
 # Depenses: datasets a pieces jointes (attachments) pour 2016-2018 et
 # 2020-2022, dont il faut resoudre dynamiquement l'URL exacte via l'endpoint
 # catalog dataset.
@@ -104,8 +162,12 @@ DEPENSES_ATTACHMENT_IDS: dict[int, dict[str, str]] = {
     },
 }
 
-# Toutes les annees de depenses couvertes par cette passe d'ingestion.
+# Toutes les annees de depenses couvertes par cette passe d'ingestion. 2015
+# reste un trou reel (voir le docstring de `api.etl.run` pour son detail).
 DEPENSES_ANNEES: tuple[int, ...] = (
+    2012,
+    2013,
+    2014,
     2016,
     2017,
     2018,
@@ -332,6 +394,8 @@ def default_depenses_source_url(annee: int) -> str | None:
     """
     if annee in DEPENSES_DATASETS_RECORDS:
         return records_url(DEPENSES_DATASETS_RECORDS[annee])
+    if annee in DEPENSES_DATASETS_2012_2014:
+        return records_url(DEPENSES_DATASETS_2012_2014[annee]["montants"])
     if annee == 2020:
         dataset_id = DEPENSES_DATASETS_ATTACHMENTS[2020]
         return attachment_url(dataset_id, DEPENSES_ATTACHMENT_IDS[2020]["credits"])
