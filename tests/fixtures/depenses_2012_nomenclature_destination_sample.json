@@ -1,0 +1,29 @@
+{
+    "total_count": 3,
+    "results": [
+        {
+            "mission": "Défense",
+            "programme": "146",
+            "action": 8,
+            "libelle_action": "Projection - mobilité - soutien",
+            "s_action": "46",
+            "libelle_ssa": "Assurer la mobilité - Rénovation Cougar"
+        },
+        {
+            "mission": "Défense",
+            "programme": "146",
+            "action": 8,
+            "libelle_action": "Projection - mobilité - soutien",
+            "s_action": "48",
+            "libelle_ssa": "Assurer la mobilité - Autres opérations"
+        },
+        {
+            "mission": "Recherche et enseignement supérieur",
+            "programme": "231",
+            "action": 1,
+            "libelle_action": "Aides directes",
+            "s_action": null,
+            "libelle_ssa": "Hélicoptères"
+        }
+    ]
+}

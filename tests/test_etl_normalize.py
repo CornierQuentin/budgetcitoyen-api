@@ -18,6 +18,9 @@ from api.etl.normalize import (
     clean_montant,
     extract_non_fiscal_et_psr_cour_des_comptes,
     extract_prelevements_sur_recettes,
+    normalize_depenses_2012,
+    normalize_depenses_2013,
+    normalize_depenses_2014,
     normalize_depenses_2016,
     normalize_depenses_2017,
     normalize_depenses_2018,
@@ -89,6 +92,139 @@ def test_normalize_mission_name_slugifie_les_accents_et_la_ponctuation() -> None
     assert normalize_mission_name("Conseil et contrôle de l'État", 2019) == (
         "conseil-et-controle-de-l-etat"
     )
+
+
+# ---------------------------------------------------------------------------
+# Depenses 2012: dataset "dotation BG" + 2 nomenclatures a joindre
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_depenses_2012_joint_les_2_nomenclatures() -> None:
+    montants = _load_json("depenses_2012_montants_sample.json")
+    nomenclature_mp = _load_json("depenses_2012_nomenclature_mission_programme_sample.json")
+    nomenclature_dest = _load_json("depenses_2012_nomenclature_destination_sample.json")
+
+    records = normalize_depenses_2012(montants, nomenclature_mp, nomenclature_dest, annee=2012)
+
+    assert len(records) == 4
+    assert all(r.annee == 2012 for r in records)
+
+    aggregats = aggregate_depenses(records)
+    par_cle = {(a.mission_code, a.programme_code, a.action_code): a for a in aggregats}
+    assert len(aggregats) == 3
+
+    # Defense/146/08: 2 lignes categorie (51 et 64) sommees par aggregate_depenses,
+    # code mission et libelle programme resolus via la nomenclature mission-programme
+    # (filtree "Budget général", la ligne CAS "Pensions"/741 du fixture est ignoree),
+    # libelle action resolu via la nomenclature destination (2 lignes sous-action
+    # partageant le meme libelle_action - seule la premiere est retenue).
+    defense = par_cle[("DA", "146", "146-08")]
+    assert defense.mission_libelle == "Défense"
+    assert defense.programme_libelle == "Équipement des forces"
+    assert defense.action_libelle == "Projection - mobilité - soutien"
+    assert defense.ae == pytest.approx(1237084791 + 3000000)
+    assert defense.cp == pytest.approx(786549540 + 3654071)
+
+    recherche = par_cle[("RA", "231", "231-01")]
+    assert recherche.programme_libelle == "Vie étudiante"
+    assert recherche.action_libelle == "Aides directes"
+    assert recherche.ae == pytest.approx(17485145)
+
+    # Solidarite/137/02: programme absent de la nomenclature mission-programme
+    # ET action absente de la nomenclature destination (fixtures volontairement
+    # lacunaires sur ce cas) -> repli sur les codes bruts, sans code mission.
+    orpheline = par_cle[("", "137", "137-02")]
+    assert orpheline.mission_libelle == "Solidarité, insertion et égalité des chances"
+    assert orpheline.programme_libelle == "137"
+    assert orpheline.action_libelle == "02"
+    assert orpheline.ae == 0.0
+    assert orpheline.cp == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Depenses 2013: meme famille que 2012, sans code mission disponible
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_depenses_2013_sans_code_mission() -> None:
+    montants = _load_json("depenses_2013_montants_sample.json")
+    nomenclature_programme = _load_json("depenses_2013_nomenclature_programme_sample.json")
+    nomenclature_dest = _load_json("depenses_2013_nomenclature_destination_sample.json")
+
+    records = normalize_depenses_2013(
+        montants, nomenclature_programme, nomenclature_dest, annee=2013
+    )
+
+    assert len(records) == 4
+    # Aucune source 2013 n'expose de code mission LOLF: toujours vide.
+    assert all(r.mission_code == "" for r in records)
+
+    aggregats = aggregate_depenses(records)
+    par_cle = {(a.mission_code, a.programme_code, a.action_code): a for a in aggregats}
+    assert len(aggregats) == 3
+
+    gfp = par_cle[("", "156", "156-09")]
+    assert gfp.programme_libelle == (
+        "Gestion fiscale et financière de l'État et du secteur public local"
+    )
+    assert gfp.action_libelle == "Soutien"
+    assert gfp.ae == pytest.approx(30575404 + 591606608)
+    assert gfp.cp == pytest.approx(47134660 + 591606608)
+
+    securite = par_cle[("", "176", "176-01")]
+    assert securite.programme_libelle == "Police nationale"
+    assert securite.action_libelle == "Ordre public et protection de la souveraineté"
+
+    # Defense/212/02: programme absent de la nomenclature programme ET action
+    # absente de la nomenclature destination (fixtures volontairement
+    # lacunaires) -> repli sur les codes bruts pour les deux libelles.
+    orpheline = par_cle[("", "212", "212-02")]
+    assert orpheline.programme_libelle == "212"
+    assert orpheline.action_libelle == "02"
+    assert orpheline.ae == 0.0
+    assert orpheline.cp == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Depenses 2014: 1 seule nomenclature BG-filtree, piege colonnes CP texte
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_depenses_2014_cp_texte_avec_espaces_de_milliers() -> None:
+    montants = _load_json("depenses_2014_montants_sample.json")
+    nomenclature_dest = _load_json("depenses_2014_nomenclature_destination_sample.json")
+
+    records = normalize_depenses_2014(montants, nomenclature_dest, annee=2014)
+
+    assert len(records) == 3
+    assert all(r.mission_code == "" for r in records)
+    # Le piege du millesime: cplf ("1 112 702") est une CHAINE avec des espaces
+    # de milliers alors qu'aelf (1112702) est un entier JSON propre - verifie
+    # ici que le montant CP nettoye est bien un flottant numeriquement egal.
+    culture_categorie_64 = records[0]
+    assert culture_categorie_64.cp == pytest.approx(1112702.0)
+    assert isinstance(culture_categorie_64.cp, float)
+
+    aggregats = aggregate_depenses(records)
+    par_cle = {(a.mission_code, a.programme_code, a.action_code): a for a in aggregats}
+    assert len(aggregats) == 2
+
+    # Culture/175/08: 2 lignes categorie (64 et 72), CP text-avec-espaces
+    # sur les deux, sommees correctement malgre le typage source.
+    culture = par_cle[("", "175", "175-08")]
+    assert culture.programme_libelle == "Patrimoines"
+    assert culture.action_libelle == "Acquisition et enrichissement des collections publiques"
+    assert culture.ae == pytest.approx(1112702 + 2118745)
+    assert culture.cp == pytest.approx(1112702 + 2118745)
+
+    # GFP/221/04: absent de la nomenclature destination (fixture volontairement
+    # lacunaire) -> repli sur les codes bruts pour les deux libelles. La ligne
+    # CAS "Désendettement de l'État"/761 du fixture (type_de_mission != "Budget
+    # général") est ignoree, meme si elle avait matche par accident.
+    orpheline = par_cle[("", "221", "221-04")]
+    assert orpheline.programme_libelle == "221"
+    assert orpheline.action_libelle == "04"
+    assert orpheline.cp == 0.0
 
 
 # ---------------------------------------------------------------------------

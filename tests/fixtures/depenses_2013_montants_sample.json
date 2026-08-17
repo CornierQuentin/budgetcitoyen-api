@@ -1,0 +1,65 @@
+{
+    "total_count": 4,
+    "results": [
+        {
+            "mission": "Gestion des finances publiques et des ressources humaines",
+            "programme": "156",
+            "action": "09",
+            "categorie": "51",
+            "libelle_categorie": "Dépenses pour immobilisations corporelles de l’État",
+            "aelf_2012": 123466514,
+            "aeplf": 30575404,
+            "aeamt": 0,
+            "aelf": 30575404,
+            "cplf_2012": 136195172,
+            "cpplf": 47134660,
+            "cpamt": 0,
+            "cplf": 47134660
+        },
+        {
+            "mission": "Gestion des finances publiques et des ressources humaines",
+            "programme": "156",
+            "action": "09",
+            "categorie": "21",
+            "libelle_categorie": "Rémunérations d’activité",
+            "aelf_2012": 633955077,
+            "aeplf": 591606608,
+            "aeamt": 0,
+            "aelf": 591606608,
+            "cplf_2012": 633955077,
+            "cpplf": 591606608,
+            "cpamt": 0,
+            "cplf": 591606608
+        },
+        {
+            "mission": "Sécurité",
+            "programme": "176",
+            "action": "01",
+            "categorie": "21",
+            "libelle_categorie": "Rémunérations d’activité",
+            "aelf_2012": 645786556,
+            "aeplf": 652264821,
+            "aeamt": 0,
+            "aelf": 652264821,
+            "cplf_2012": 645786556,
+            "cpplf": 652264821,
+            "cpamt": 0,
+            "cplf": 652264821
+        },
+        {
+            "mission": "Défense",
+            "programme": "212",
+            "action": "02",
+            "categorie": "23",
+            "libelle_categorie": "Prestations sociales et allocations diverses",
+            "aelf_2012": 313048,
+            "aeplf": 0,
+            "aeamt": 0,
+            "aelf": 0,
+            "cplf_2012": 313048,
+            "cpplf": 0,
+            "cpamt": 0,
+            "cplf": 0
+        }
+    ]
+}

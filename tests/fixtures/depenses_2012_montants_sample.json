@@ -1,0 +1,65 @@
+{
+    "total_count": 4,
+    "results": [
+        {
+            "mission": "Défense",
+            "programme": "146",
+            "action": "08",
+            "categorie": "51",
+            "libelle_categorie": "Dépenses pour immobilisations corporelles de l’État",
+            "aelf_2011": 1320757450,
+            "aeplf": 1251084791,
+            "aeamt": -14000000,
+            "aelf": 1237084791,
+            "cplf_2011": 1082684937,
+            "cpplf": 786549540,
+            "cpamt": 0,
+            "cplf": 786549540
+        },
+        {
+            "mission": "Défense",
+            "programme": "146",
+            "action": "08",
+            "categorie": "64",
+            "libelle_categorie": "Transferts aux autres collectivités",
+            "aelf_2011": 0,
+            "aeplf": 3000000,
+            "aeamt": 0,
+            "aelf": 3000000,
+            "cplf_2011": 0,
+            "cpplf": 3654071,
+            "cpamt": 0,
+            "cplf": 3654071
+        },
+        {
+            "mission": "Recherche et enseignement supérieur",
+            "programme": "231",
+            "action": "01",
+            "categorie": "32",
+            "libelle_categorie": "Subventions pour charges de service public",
+            "aelf_2011": 17485145,
+            "aeplf": 17485145,
+            "aeamt": 0,
+            "aelf": 17485145,
+            "cplf_2011": 17485145,
+            "cpplf": 17485145,
+            "cpamt": 0,
+            "cplf": 17485145
+        },
+        {
+            "mission": "Solidarité, insertion et égalité des chances",
+            "programme": "137",
+            "action": "02",
+            "categorie": "64",
+            "libelle_categorie": "Transferts aux autres collectivités",
+            "aelf_2011": 3465074,
+            "aeplf": 0,
+            "aeamt": 0,
+            "aelf": 0,
+            "cplf_2011": 3465074,
+            "cpplf": 0,
+            "cpamt": 0,
+            "cplf": 0
+        }
+    ]
+}
