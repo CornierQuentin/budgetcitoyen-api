@@ -98,6 +98,65 @@ def attachment_url(dataset_id: str, attachment_id: str) -> str:
     return f"{API_EXPLORE_V21}/{dataset_id}/attachments/{attachment_id}"
 
 
+# --------------------------------------------------------------------------
+# Indicateurs macro: PIB nominal et population, pour les futurs indicateurs
+# "par habitant"/"par seconde" du frontend (ex. "Depenses = X EUR par
+# Francais"). Table dediee `indicateur_macro`, distincte de `annee_budget`.
+# --------------------------------------------------------------------------
+
+# PIB nominal ("PIB en valeur", prix courants - PAS le volume/prix chaines),
+# 1949-2022, colonnes CSV "annee,pib" en MILLIONS d'euros courants. Source:
+# data.gouv.fr, qui reprend telle quelle la serie INSEE "Comptes nationaux
+# annuels base 2014 - Produit interieur brut approche produit - Prix
+# courant" (idbank 010548500,
+# https://www.insee.fr/fr/statistiques/serie/010548500) - EXPLICITEMENT
+# marquee "Serie arretee" (discontinuee) par l'INSEE suite au changement de
+# base (passage a la base 2020 le 31/05/2024, cf. "Comptes nationaux
+# annuels en 2024"): aucune donnee 2023-2025 dans ce fichier. Ce n'est pas
+# un trou de telechargement mais un trou reel de continuite de cette serie
+# precise - complete par PIB_COMPLEMENT_XLSX_URLS ci-dessous.
+PIB_CSV_URL = f"{DATA_GOUV_BASE_URL}/api/1/datasets/r/cd2ac200-0130-459e-809f-843f46e20d28"
+
+# Complement 2023, 2024, 2025 (PIB nominal, prix courants, base 2020).
+#
+# La serie successeur base 2020 (idbank 011779992,
+# https://www.insee.fr/fr/statistiques/serie/011779992) n'est PAS
+# telechargeable publiquement en CSV/xlsx sans cle d'API: verifie a
+# l'execution reelle (aout 2026) - les pages "serie/<idbank>" d'insee.fr
+# sont rendues cote client (React/SPA, aucune donnee dans le HTML statique)
+# et les endpoints bdm.insee.fr/series/sdmx/data/... retournent une erreur
+# 500 sans authentification (portail "Melodi", successeur de l'ancien BDM,
+# necessite une cle sur api.insee.fr).
+#
+# A la place, chaque edition annuelle de la publication "Insee Premiere -
+# Les comptes de la Nation en <annee>" fournit un fichier de donnees joint
+# (feuille "Figure 1 - Le PIB et les operations sur les biens et les
+# services") avec le NIVEAU du PIB en milliards d'euros COURANTS (colonne
+# "En milliards d'euros", explicitement distincte des colonnes "Evolution
+# en volume" en %) pour la derniere annee couverte par l'edition. Valeurs
+# verifiees a l'execution reelle: 2023 = 2822,5 Md EUR (IP1997), 2024 =
+# 2919,9 Md EUR (IP2053), 2025 = 2991,1 Md EUR (IP2105) - source "Insee,
+# comptes nationaux, base 2020" citee dans chaque fichier. Ces chiffres
+# peuvent faire l'objet de legeres revisions d'une edition a l'autre (toute
+# comptabilite nationale est susceptible de revisions): on retient ici,
+# pour chaque annee, le chiffre publie dans l'edition qui lui est dediee.
+PIB_COMPLEMENT_XLSX_URLS: dict[int, str] = {
+    2023: "https://www.insee.fr/fr/statistiques/fichier/8193933/IP1997.xlsx",
+    2024: "https://www.insee.fr/fr/statistiques/fichier/8574058/IP2053.xlsx",
+    2025: "https://www.insee.fr/fr/statistiques/fichier/8996855/IP2105.xlsx",
+}
+
+# Population au 1er janvier, France entiere (avec DOM a partir de 2014, hors
+# Mayotte avant), onglet "FR" du fichier INSEE "Population annuelle et
+# composantes de l'evolution demographique" - colonne "Population au 1er
+# janvier". Les annees anciennes (avant 1982 dans l'edition courante) valent
+# "nd" (non disponible) dans la source: trou reel documente, pas un bug de
+# parsing (cf. `api.etl.normalize.normalize_population_xlsx`).
+POPULATION_XLSX_URL = (
+    "https://www.insee.fr/fr/statistiques/fichier/8560651/1_Pop_annu_compo_evol.xlsx"
+)
+
+
 def default_depenses_source_url(annee: int) -> str | None:
     """URL du dataset "depenses" principal d'une annee, quel que soit son format.
 

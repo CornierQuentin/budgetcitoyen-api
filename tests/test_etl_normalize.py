@@ -21,6 +21,9 @@ from api.etl.normalize import (
     normalize_depenses_attachment_detaillee,
     normalize_depenses_records_json,
     normalize_mission_name,
+    normalize_pib_complement_insee_premiere,
+    normalize_pib_csv,
+    normalize_population_xlsx,
     normalize_recettes_records_json,
     resolve_mission_identities,
 )
@@ -36,6 +39,10 @@ def _load_json(name: str) -> list[dict]:
 
 def _load_csv_cp1252(name: str) -> str:
     return (FIXTURES / name).read_bytes().decode("cp1252")
+
+
+def _load_bytes(name: str) -> bytes:
+    return (FIXTURES / name).read_bytes()
 
 
 # ---------------------------------------------------------------------------
@@ -381,3 +388,67 @@ def test_resolve_mission_identities_libelle_change_garde_un_slug_stable() -> Non
     assert alias_par_libelle["Justice"].annee_fin == 2020
     assert alias_par_libelle["Justice et libertés"].annee_debut == 2024
     assert alias_par_libelle["Justice et libertés"].annee_fin == 2024
+
+
+# ---------------------------------------------------------------------------
+# Indicateurs macro: PIB nominal et population
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_pib_csv_convertit_millions_en_euros() -> None:
+    raw = _load_bytes("pib_courant_sample.csv")
+    pib = normalize_pib_csv(raw)
+
+    assert pib == {
+        2022: pytest.approx(2_639_092_000_000.0),
+        2021: pytest.approx(2_502_118_000_000.0),
+        2020: pytest.approx(2_317_832_000_000.0),
+        1950: pytest.approx(15_513_000_000.0),
+    }
+
+
+def test_normalize_pib_csv_accepte_une_chaine_deja_decodee() -> None:
+    texte = "annee,pib\n2022,2639092\n"
+    pib = normalize_pib_csv(texte)
+
+    assert pib == {2022: pytest.approx(2_639_092_000_000.0)}
+
+
+def test_normalize_pib_complement_insee_premiere_extrait_le_niveau_nominal() -> None:
+    """Utilise une feuille "Figure 1" minimale, reproduisant la structure
+    reelle observee sur l'edition Insee Premiere 2024 ("Les comptes de la
+    Nation en 2024", IP2053): colonne A=libelle, B/C/D=evolutions en volume
+    (annees precedentes), E="En milliards d'euros" (niveau nominal de
+    l'annee courante) - PAS les colonnes d'evolution en volume qui la
+    precedent.
+    """
+    raw = _load_bytes("pib_complement_2024_sample.xlsx")
+    pib = normalize_pib_complement_insee_premiere(raw, 2024)
+
+    assert pib == pytest.approx(2_919_900_000_000.0)
+
+
+def test_normalize_pib_complement_insee_premiere_leve_si_annee_ne_correspond_pas() -> None:
+    raw = _load_bytes("pib_complement_2024_sample.xlsx")
+
+    with pytest.raises(ValueError):
+        normalize_pib_complement_insee_premiere(raw, 2025)
+
+
+def test_normalize_population_xlsx_lit_l_onglet_fr() -> None:
+    """Utilise une feuille "FR" minimale reproduisant la structure reelle du
+    fichier INSEE "1_Pop_annu_compo_evol.xlsx": 3 lignes d'en-tete avant les
+    donnees, annees anciennes marquees "nd " (non disponible, exclues), et
+    dernieres annees suffixees " (p)" (provisoire, prefixe 4 chiffres
+    extrait).
+    """
+    raw = _load_bytes("population_fr_sample.xlsx")
+    population = normalize_population_xlsx(raw)
+
+    # L'annee 1980 vaut "nd " (non disponible) dans la fixture -> exclue.
+    assert 1980 not in population
+    assert population == {
+        2020: 67441850,
+        2021: 67697091,
+        2022: 68060207,
+    }
