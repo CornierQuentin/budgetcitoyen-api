@@ -33,6 +33,7 @@ import logging
 import re
 import unicodedata
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -647,6 +648,291 @@ def extract_prelevements_sur_recettes(
     return PrelevementsSurRecettes(
         annee=annee, collectivites=collectivites, union_europeenne=union_europeenne
     )
+
+
+def _strip_accents(text: str) -> str:
+    """Retire les diacritiques d'une chaine (e -> e, a -> a...), sans toucher a la casse."""
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in normalized if not unicodedata.combining(c))
+
+
+def _normalize_label(cell: str) -> str:
+    """Normalise une cellule CSV pour un rapprochement insensible aux accents/casse/espaces.
+
+    A la difference de `_slugify` (utilise pour les slugs de mission), les
+    espaces internes sont CONSERVES (pas remplaces par des tirets): les
+    predicats de `_LABEL_MATCHERS` ci-dessous testent des sous-chaines
+    multi-mots ("valeur ajoutee") qui doivent rester detectables telles
+    quelles.
+    """
+    return _strip_accents(cell).strip().lower()
+
+
+def _md_ou_m_vers_euros(valeur: float) -> float:
+    """Convertit un montant Cour des comptes (Md EUR ou M EUR) en EUROS.
+
+    Les tableaux Cour des comptes exploites ici expriment les montants en
+    milliards d'euros (Md EUR, ex: "82.361" pour l'IR) ou en millions
+    d'euros (M EUR, ex: "287860.8" pour le total des recettes fiscales
+    nettes) SELON LE MILLESIME - et l'intitule de colonne du fichier n'est
+    PAS fiable pour distinguer les deux: le fichier 2022 (G16.csv) et le
+    fichier 2023 (G 14.csv) affichent tous deux un en-tete "Designation des
+    recettes (M.€)" alors que leurs valeurs sont en realite en Md EUR
+    (confirme par recoupement avec le total agrege du "tableau d'equilibre"
+    de la meme annee, exprime celui-la sans ambiguite en M EUR) - erreur de
+    libelle cote source, pas une variation reelle d'unite.
+    On se base donc sur l'ORDRE DE GRANDEUR plutot que sur le texte de
+    l'en-tete: un poste fiscal unique (IR, IS, TICPE, TVA, Autres, PSR,
+    recettes non fiscales) vaut, pour la France, TOUJOURS moins de 1000 en
+    Md EUR (dizaines a ~150 Md EUR) et TOUJOURS plus de 1000 en M EUR
+    (dizaines a centaines de milliers de M EUR) - heuristique verifiee sur
+    les 13 tableaux (7 "par impot" + 6 "equilibre") retenus par cette passe
+    d'ingestion en comparant leurs totaux aux montants officiels connus.
+    """
+    if abs(valeur) < 1000:
+        return valeur * 1_000_000_000
+    return valeur * 1_000_000
+
+
+def _lire_lignes_csv(csv_text: str, delimiter: str) -> list[list[str]]:
+    """Parse un CSV Cour des comptes en liste de lignes (listes de cellules).
+
+    Retire un eventuel BOM UTF-8 en tete de fichier (`normalize_recettes_
+    cour_des_comptes`/`extract_non_fiscal_et_psr_cour_des_comptes` peuvent
+    recevoir un texte deja decode sans que l'appelant ait necessairement
+    utilise un codec "-sig"). `csv.reader` sur un `io.StringIO` gere
+    nativement les champs quotes contenant des retours a la ligne (observes
+    dans l'en-tete de certains fichiers, ex: une cellule litterale
+    '"LFI\\n2020"').
+    """
+    return list(csv.reader(io.StringIO(csv_text.lstrip("﻿")), delimiter=delimiter))
+
+
+def _colonne_lfi(lignes: list[list[str]], annee: int) -> int:
+    """Localise l'index de la colonne "LFI" (Loi de Finances Initiale votee).
+
+    Les tableaux Cour des comptes exploites ici n'ont pas une ligne d'en-tete
+    a position fixe (certains fichiers portent un titre fusionne sur la
+    premiere ligne, une colonne d'index pandas parasite en tete de chaque
+    ligne pour d'autres - artefact d'un export `DataFrame.to_csv()` sans
+    `index=False` cote Cour des comptes): on cherche donc, sur TOUTES les
+    lignes et TOUTES les cellules, la premiere qui commence par "lfi" une
+    fois normalisee (ex: "LFI 2016", "LFI 2018", "LFI.2022", ou simplement
+    "LFI"). Ce prefixe distingue bien la colonne voulue de "LFR"/"LFG"/"PLF"
+    (Loi de Finances Rectificative / de fin de Gestion / Projet de LF),
+    presentes cote a cote dans plusieurs de ces tableaux.
+    """
+    for ligne in lignes:
+        for idx, cellule in enumerate(ligne):
+            if _normalize_label(cellule).startswith("lfi"):
+                return idx
+    raise ValueError(f"annee {annee}: colonne LFI introuvable dans le tableau Cour des comptes")
+
+
+def _label_ligne(ligne: list[str]) -> str | None:
+    """Retourne la premiere cellule "textuelle" (non vide, non numerique) d'une ligne.
+
+    Ignore les cellules vides et celles parsables comme un nombre (la
+    colonne d'index pandas parasite en tete de certaines lignes, cf.
+    `_colonne_lfi`, ou une annee isolee en cellule). Retourne None si la
+    ligne ne contient aucune cellule "label" exploitable (ligne vide,
+    separateur, ou ligne uniquement numerique).
+    """
+    for cellule in ligne:
+        normalisee = _normalize_label(cellule)
+        if not normalisee:
+            continue
+        try:
+            clean_montant(normalisee)
+        except ValueError:
+            return normalisee
+    return None
+
+
+# Predicats de rapprochement (libelle normalise -> TypeRecette) pour le
+# tableau "recettes fiscales nettes par impot". L'intitule exact de chaque
+# ligne varie d'un millesime a l'autre ("Impot sur le revenu" vs "Impot NET
+# sur le revenu", "TICPE" vs "Taxe interieure de consommation sur les
+# produits energetiques" en toutes lettres en 2017...): les predicats
+# cherchent un fragment stable plutot qu'une correspondance exacte. Verifie
+# sur les 7 fichiers "par impot" retenus (2016-2020, 2022, 2023): aucune
+# ligne "hors perimetre" (total, sous-detail "...dont ...") ne matche par
+# accident (elles ne contiennent aucun de ces fragments).
+_RECETTES_PAR_IMPOT_MATCHERS: tuple[tuple[TypeRecette, Callable[[str], bool]], ...] = (
+    (TypeRecette.IR, lambda n: "revenu" in n),
+    (TypeRecette.IS, lambda n: "societ" in n),
+    (TypeRecette.TICPE, lambda n: "ticpe" in n or "energetique" in n),
+    (TypeRecette.TVA, lambda n: "tva" in n or "valeur ajoutee" in n),
+    (TypeRecette.AUTRES, lambda n: "autres" in n and "fiscale" in n),
+)
+
+
+def normalize_recettes_cour_des_comptes(
+    csv_text: str, annee: int, delimiter: str = ";"
+) -> list[RecetteRecord]:
+    """Normalise le tableau "recettes fiscales nettes par impot" (Cour des comptes).
+
+    Source: rapports annuels "Le budget de l'Etat en <annee>" de la Cour des
+    comptes, 2016-2020/2022/2023 (voir `api.etl.sources.
+    RECETTES_COUR_DES_COMPTES_*` pour le detail par millesime, les fichiers
+    ZIP/CSV exacts localises par recherche de CONTENU - PAS par motif de nom,
+    les noms etant incoherents d'une annee sur l'autre - et les exclusions
+    2015/2021).
+
+    Colonne retenue: LFI (Loi de Finances Initiale VOTEE), pour rester
+    coherent avec les depenses deja en base (elles aussi toutes en LFI) -
+    PAS la colonne Execution/PLF/LFR/LFG presente a cote dans ces memes
+    tableaux, meme quand elle serait disponible.
+
+    Precision moindre que les donnees 2024-2025 (OpenDataSoft, a l'euro
+    pres): ces tableaux Cour des comptes arrondissent a 1 decimale en
+    milliards d'euros dans les millesimes 2016-2019 (~50-100 M EUR de bruit
+    par ligne), et jusqu'a plusieurs decimales dans les fichiers CSV sources
+    2020/2022/2023 (le PDF publie, lui, reste arrondi a 1 decimale - le CSV
+    "brut" est simplement plus precis que sa restitution papier). Convertit
+    Md EUR/M EUR en EUROS - voir `_md_ou_m_vers_euros` pour l'heuristique de
+    detection de l'unite (PAS fiable via le texte de l'en-tete, verifie a
+    l'execution reelle sur ces sources).
+
+    ATTENTION consommateurs de cette fonction: le resultat est en recettes
+    fiscales NETTES (nettes des remboursements et degrevements, R&D). Le
+    pipeline "depenses" existant (`api.etl.loader.upsert_depenses`) charge
+    lui les depenses sur une base BRUTE (il somme TOUTES les missions, y
+    compris "Remboursements et degrevements" elle-meme, sans la
+    retrancher). Combiner tel quel ces recettes nettes avec ces depenses
+    brutes SURESTIME le deficit calcule d'environ le montant de cette
+    mission (~130-150 Md EUR/an) - voir `api.etl.loader.
+    get_remboursements_degrevements_cp` pour le rattrapage applique par
+    `api.etl.run._charger_recettes_cour_des_comptes`.
+
+    Ne contient PAS les PSR (prelevements sur recettes): ce tableau est
+    conceptuellement une pure decomposition de la fiscalite par impot, la
+    notion de PSR relevant du "budget general" (tableau d'equilibre) plutot
+    que de la recette fiscale en tant que telle - verifie par recoupement
+    (aucune ligne PSR dans les 7 fichiers retenus). Les PSR et les recettes
+    non fiscales, quand disponibles pour le millesime, sont extraits a part
+    par `extract_non_fiscal_et_psr_cour_des_comptes` depuis le "tableau
+    d'equilibre" - un fichier DIFFERENT du meme rapport.
+    """
+    lignes = _lire_lignes_csv(csv_text, delimiter)
+    colonne_lfi = _colonne_lfi(lignes, annee)
+
+    montants: dict[TypeRecette, float] = defaultdict(float)
+    for ligne in lignes:
+        if colonne_lfi >= len(ligne):
+            continue
+        label = _label_ligne(ligne)
+        if label is None:
+            continue
+        for type_recette, predicat in _RECETTES_PAR_IMPOT_MATCHERS:
+            if predicat(label):
+                try:
+                    valeur = clean_montant(ligne[colonne_lfi])
+                except ValueError:
+                    logger.warning(
+                        "annee %d: valeur LFI illisible pour la ligne %r (%r), ignoree",
+                        annee,
+                        label,
+                        ligne[colonne_lfi],
+                    )
+                    break
+                montants[type_recette] += _md_ou_m_vers_euros(valeur)
+                break
+
+    if not montants:
+        raise ValueError(
+            f"annee {annee}: aucune ligne recette fiscale reconnue dans le tableau Cour des "
+            "comptes (structure de la source a peut-etre change)"
+        )
+
+    return [
+        RecetteRecord(annee=annee, type=type_recette, montant=montant)
+        for type_recette, montant in montants.items()
+    ]
+
+
+# Fragments identifiant les lignes PSR dans le "tableau d'equilibre": ces
+# libelles abregent parfois "Union europeenne"/"collectivites territoriales"
+# en simple suffixe "UE"/"CT" (ex: "Prelevements sur recettes UE") plutot
+# que d'ecrire le nom en toutes lettres comme dans d'autres millesimes (ex:
+# "PSR au profit de l'Union europeenne") - d'ou la recherche du mot "ue"/
+# "ct" en plus du nom complet.
+_RE_PSR_UE = re.compile(r"union europ|(?:^|[^a-z])ue(?:$|[^a-z])")
+_RE_PSR_CT = re.compile(r"collectivit|(?:^|[^a-z])ct(?:$|[^a-z])")
+
+
+def extract_non_fiscal_et_psr_cour_des_comptes(
+    csv_text: str, annee: int, delimiter: str = ";"
+) -> tuple[float, PrelevementsSurRecettes]:
+    """Extrait les recettes non fiscales et les PSR du "tableau d'equilibre" (Cour des comptes).
+
+    Source: le MEME rapport annuel que `normalize_recettes_cour_des_comptes`
+    mais un fichier CSV DIFFERENT au sein du ZIP (voir `api.etl.sources.
+    RECETTES_COUR_DES_COMPTES_FICHIER_EQUILIBRE` - absent pour 2023, cf. son
+    commentaire). Ce tableau presente le passage des recettes fiscales
+    nettes aux "recettes nettes du budget general": recettes fiscales
+    nettes (a) + recettes non fiscales (b) - PSR UE (c) - PSR collectivites
+    (d) [+ fonds de concours (e), volontairement IGNORE ici pour rester
+    coherent avec la methodologie 2024-2025 deja en place, qui ne modelise
+    pas non plus cette ligne - cf. `api.etl.loader.recalculer_annee_budget`].
+
+    Retourne (recettes_non_fiscales_euros, PrelevementsSurRecettes): le
+    premier est a ajouter au bucket TypeRecette.AUTRES (comme pour
+    2024-2025, ou les recettes non fiscales n'ont pas de type dedie - cf.
+    `normalize_recettes_records_json`), le second a fournir tel quel a
+    `api.etl.loader.recalculer_annee_budget` (meme methodologie et meme
+    dataclass que pour 2024-2025: les PSR sont retranches des recettes
+    fiscales+non fiscales, pas stockes dans `recette`).
+
+    Meme conversion Md EUR/M EUR que `normalize_recettes_cour_des_comptes`
+    (voir `_md_ou_m_vers_euros`) et memes limites de precision.
+
+    Leve `ValueError` si l'une des trois lignes attendues (recettes non
+    fiscales, PSR UE, PSR collectivites) est introuvable, plutot que de
+    retourner silencieusement une valeur par defaut de 0 qui fausserait
+    `recettes_nettes` sans avertissement.
+    """
+    lignes = _lire_lignes_csv(csv_text, delimiter)
+    colonne_lfi = _colonne_lfi(lignes, annee)
+
+    non_fiscal: float | None = None
+    psr_ue: float | None = None
+    psr_ct: float | None = None
+
+    for ligne in lignes:
+        if colonne_lfi >= len(ligne):
+            continue
+        label = _label_ligne(ligne)
+        if label is None:
+            continue
+        try:
+            valeur = _md_ou_m_vers_euros(clean_montant(ligne[colonne_lfi]))
+        except ValueError:
+            continue
+
+        if "recettes non fiscales" in label:
+            non_fiscal = valeur
+        elif _RE_PSR_UE.search(label) and ("prelevement" in label or "psr" in label):
+            psr_ue = valeur
+        elif _RE_PSR_CT.search(label) and ("prelevement" in label or "psr" in label):
+            psr_ct = valeur
+
+    if non_fiscal is None or psr_ue is None or psr_ct is None:
+        raise ValueError(
+            f"annee {annee}: tableau d'equilibre Cour des comptes incomplet "
+            f"(non_fiscal={non_fiscal}, psr_ue={psr_ue}, psr_ct={psr_ct}) - structure de la "
+            "source a peut-etre change"
+        )
+
+    # Les PSR sont des montants RETRANCHES du total (cellules source
+    # negatives, ex: "-21480.0"): `PrelevementsSurRecettes` attend des
+    # montants POSITIFS (le signe "-" est applique par l'appelant, cf.
+    # `api.etl.loader.recalculer_annee_budget`: `recettes_total =
+    # recettes_brutes - prelevements_sur_recettes`).
+    psr = PrelevementsSurRecettes(
+        annee=annee, collectivites=abs(psr_ct), union_europeenne=abs(psr_ue)
+    )
+    return non_fiscal, psr
 
 
 def aggregate_recettes(records: list[RecetteRecord]) -> list[RecetteAggregat]:

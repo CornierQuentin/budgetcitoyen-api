@@ -5,11 +5,14 @@ Usage:
         [--depenses-only | --recettes-only | --indicateurs-only]
 
 Ingere les depenses de l'Etat (budget general) pour 2019-2025, les recettes
-du budget general pour 2024-2025 (seules annees disponibles sous forme
-structuree sur data.economie.gouv.fr - trou de donnees reel pour 2015-2023,
-documente dans le README/JOURNAL du projet, pas une limitation de ce
-script), et les indicateurs macro (PIB nominal, population - voir
-`_charger_indicateurs`).
+du budget general pour 2016-2020/2022-2025 (deux sources cohabitent: le
+portail data.economie.gouv.fr pour 2024-2025, et les rapports annuels "Le
+budget de l'Etat en <annee>" de la Cour des comptes pour 2016-2020 et
+2022-2023 - voir `_charger_recettes` et `_charger_recettes_cour_des_comptes`
+respectivement), et les indicateurs macro (PIB nominal, population - voir
+`_charger_indicateurs`). 2015 et 2021 restent des trous reels (aucune des
+deux sources ne fournit de tableau exploitable pour ces annees - voir
+`api.etl.sources.RECETTES_COUR_DES_COMPTES_ZIP_URLS`).
 """
 
 from __future__ import annotations
@@ -18,7 +21,9 @@ import argparse
 import asyncio
 import logging
 import sys
+import zipfile
 from collections.abc import Iterable
+from io import BytesIO
 from typing import Any
 
 import httpx
@@ -26,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.db.session import async_session_maker
 from api.etl import loader, normalize, sources
+from api.models.recette import TypeRecette
 
 logger = logging.getLogger("api.etl")
 
@@ -228,6 +234,137 @@ async def _charger_recettes(
     return psr_par_annee
 
 
+def _decode_zip_member(data: bytes) -> str:
+    """Decode le contenu d'un membre de ZIP Cour des comptes en texte.
+
+    Les fichiers retenus (voir `api.etl.sources.
+    RECETTES_COUR_DES_COMPTES_FICHIER_IMPOT`/`_EQUILIBRE`) sont tous en
+    UTF-8 (verifie a l'inspection reelle) mais d'AUTRES membres de ces
+    memes ZIP (non utilises ici) sont en CP1252/Latin-1: on essaie donc
+    plusieurs codecs par prudence plutot que de supposer l'UTF-8, Latin-1
+    en dernier recours ne pouvant jamais echouer (accepte tout octet).
+    """
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("latin-1")
+
+
+async def _fetch_zip_member(client: httpx.AsyncClient, zip_url: str, member_name: str) -> str:
+    """Telecharge un ZIP et en decode un membre CSV donne en texte."""
+    zip_bytes = await _get_bytes(client, zip_url)
+    with zipfile.ZipFile(BytesIO(zip_bytes)) as archive:
+        return _decode_zip_member(archive.read(member_name))
+
+
+async def _charger_recettes_cour_des_comptes(
+    db: AsyncSession, client: httpx.AsyncClient, annees: list[int]
+) -> dict[int, float]:
+    """Telecharge, normalise et charge les recettes 2016-2020/2022-2023 (Cour des comptes).
+
+    Source distincte de `_charger_recettes` (data.economie.gouv.fr,
+    2024-2025): les rapports annuels "Le budget de l'Etat en <annee>" de la
+    Cour des comptes, seule source identifiee couvrant 2016-2023 (2015 et
+    2021 exclus - voir `api.etl.sources.RECETTES_COUR_DES_COMPTES_ZIP_URLS`).
+    Chaque millesime telecharge un ZIP et en extrait deux membres CSV: le
+    tableau "recettes fiscales nettes par impot" (toujours present pour les
+    annees couvertes) et, quand disponible (absent pour 2023 - cf.
+    `api.etl.sources.RECETTES_COUR_DES_COMPTES_FICHIER_EQUILIBRE`), le
+    "tableau d'equilibre" fournissant les recettes non fiscales (ajoutees
+    au bucket `TypeRecette.AUTRES`, comme pour 2024-2025 ou elles n'ont pas
+    de type dedie) et les PSR (retournes ici, a deduire en aval par
+    `loader.recalculer_annee_budget` - meme methodologie que pour
+    2024-2025).
+
+    Retourne le mapping {annee: total PSR en EUROS}, comme `_charger_
+    recettes`. Une annee sans tableau d'equilibre (2023) n'a PAS d'entree
+    dans ce mapping: `recalculer_annee_budget` utilisera alors son defaut
+    de 0.0 (aucun PSR deduit) - limitation connue et documentee (cf.
+    `api.etl.sources.RECETTES_COUR_DES_COMPTES_FICHIER_EQUILIBRE`), pas un
+    oubli.
+
+    Rattrapage "brut/net" (voir `loader.get_remboursements_degrevements_cp`
+    pour le detail complet): les tableaux Cour des comptes exploites ici
+    sont explicitement en recettes fiscales NETTES, alors que les depenses
+    deja chargees par le pipeline "depenses" existant (`upsert_depenses`)
+    sont sur une base BRUTE (elles somment la mission "Remboursements et
+    degrevements" comme une depense a part entiere, sans la retrancher).
+    Sans rattrapage, le deficit calcule par `recalculer_annee_budget`
+    serait systematiquement SURESTIME d'environ ce montant (~130-150 Md
+    EUR/an) - constate a l'execution reelle. On ajoute donc, pour CHAQUE
+    annee traitee ici, le CP deja charge de cette mission au bucket
+    `TypeRecette.AUTRES` (le seul bucket "fourre-tout" du modele actuel -
+    cf. `TypeRecette`), afin que la somme totale des recettes redevienne
+    comparable a la base brute des depenses. Vaut 0.0 (sans effet) pour une
+    annee sans depenses chargees (2016-2018): `annee_budget` n'y sera de
+    toute facon pas calcule (cf. `recalculer_annee_budget`).
+    """
+    tous_les_aggregats: list[normalize.RecetteAggregat] = []
+    psr_par_annee: dict[int, float] = {}
+    for annee in annees:
+        zip_url = sources.RECETTES_COUR_DES_COMPTES_ZIP_URLS[annee]
+        delimiter = sources.RECETTES_COUR_DES_COMPTES_DELIMITER[annee]
+        fichier_impot = sources.RECETTES_COUR_DES_COMPTES_FICHIER_IMPOT[annee]
+
+        impot_text = await _fetch_zip_member(client, zip_url, fichier_impot)
+        records = normalize.normalize_recettes_cour_des_comptes(impot_text, annee, delimiter)
+
+        fichier_equilibre = sources.RECETTES_COUR_DES_COMPTES_FICHIER_EQUILIBRE.get(annee)
+        if fichier_equilibre is not None:
+            equilibre_text = await _fetch_zip_member(client, zip_url, fichier_equilibre)
+            non_fiscal, psr = normalize.extract_non_fiscal_et_psr_cour_des_comptes(
+                equilibre_text, annee, delimiter
+            )
+            records = [
+                *records,
+                normalize.RecetteRecord(annee=annee, type=TypeRecette.AUTRES, montant=non_fiscal),
+            ]
+            psr_par_annee[annee] = psr.total
+            logger.info(
+                "annee %d (Cour des comptes): recettes non fiscales LFI = %.1f Md EUR, "
+                "PSR exclus = %.1f Md EUR (collectivites %.1f + UE %.1f)",
+                annee,
+                non_fiscal / 1e9,
+                psr.total / 1e9,
+                psr.collectivites / 1e9,
+                psr.union_europeenne / 1e9,
+            )
+        else:
+            logger.warning(
+                "annee %d (Cour des comptes): pas de tableau d'equilibre disponible - "
+                "recettes non fiscales et PSR NON pris en compte (recette limitee a la "
+                "fiscalite nette par impot)",
+                annee,
+            )
+
+        rd_cp = await loader.get_remboursements_degrevements_cp(db, annee)
+        if rd_cp:
+            records = [
+                *records,
+                normalize.RecetteRecord(annee=annee, type=TypeRecette.AUTRES, montant=rd_cp),
+            ]
+            logger.info(
+                "annee %d (Cour des comptes): +%.1f Md EUR ajoutes a AUTRES (mission "
+                "'Remboursements et degrevements' deja chargee comme depense - rattrapage "
+                "brut/net, cf. loader.get_remboursements_degrevements_cp)",
+                annee,
+                rd_cp / 1e9,
+            )
+
+        aggregats = normalize.aggregate_recettes(records)
+        tous_les_aggregats.extend(aggregats)
+        logger.info(
+            "recettes %d (Cour des comptes, colonne LFI): %d types agreges",
+            annee,
+            len(aggregats),
+        )
+
+    await loader.upsert_recettes(db, tous_les_aggregats)
+    return psr_par_annee
+
+
 # ---------------------------------------------------------------------------
 # Etape indicateurs macro (PIB nominal, population)
 # ---------------------------------------------------------------------------
@@ -296,20 +433,38 @@ async def run_etl(
 ) -> None:
     annees_list = sorted(set(annees))
     depenses_annees = [a for a in annees_list if a in sources.DEPENSES_ANNEES] if depenses else []
+    # Les recettes proviennent de deux sources distinctes selon l'annee (cf.
+    # docstring de module): OpenDataSoft (2024-2025) et Cour des comptes
+    # (2016-2020, 2022-2023). Une annee couverte par les deux listes (aucun
+    # cas actuel) serait traitee par les deux, ce qui n'est pas souhaitable
+    # mais n'arrive pas en pratique (les deux plages sont disjointes).
     recettes_annees = [a for a in annees_list if a in sources.RECETTES_ANNEES] if recettes else []
+    recettes_annees_ccomptes = (
+        [a for a in annees_list if a in sources.RECETTES_COUR_DES_COMPTES_ANNEES]
+        if recettes
+        else []
+    )
 
     hors_perimetre = [
         a
         for a in annees_list
-        if a not in sources.DEPENSES_ANNEES and a not in sources.RECETTES_ANNEES
+        if a not in sources.DEPENSES_ANNEES
+        and a not in sources.RECETTES_ANNEES
+        and a not in sources.RECETTES_COUR_DES_COMPTES_ANNEES
     ]
     for a in hors_perimetre:
-        logger.warning("annee %d hors perimetre de cette passe d'ingestion (2019-2025), ignoree", a)
+        logger.warning(
+            "annee %d hors perimetre de cette passe d'ingestion (depenses: 2019-2025, "
+            "recettes: 2016-2020/2022-2025), ignoree",
+            a,
+        )
 
     logger.info(
-        "demarrage ETL: depenses=%s recettes=%s indicateurs=%s",
+        "demarrage ETL: depenses=%s recettes(opendatasoft)=%s recettes(cour des comptes)=%s "
+        "indicateurs=%s",
         depenses_annees or "aucune",
         recettes_annees or "aucune",
+        recettes_annees_ccomptes or "aucune",
         indicateurs,
     )
 
@@ -329,7 +484,11 @@ async def run_etl(
             if depenses_annees:
                 source_url_par_annee = await _charger_depenses(db, client, depenses_annees)
             if recettes_annees:
-                psr_par_annee = await _charger_recettes(db, client, recettes_annees)
+                psr_par_annee.update(await _charger_recettes(db, client, recettes_annees))
+            if recettes_annees_ccomptes:
+                psr_par_annee.update(
+                    await _charger_recettes_cour_des_comptes(db, client, recettes_annees_ccomptes)
+                )
             if indicateurs:
                 await _charger_indicateurs(db, client)
 
