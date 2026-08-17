@@ -1,6 +1,6 @@
 """Logique metier liee aux agregats budgetaires annuels."""
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.errors import ProblemDetailException
@@ -24,6 +24,24 @@ async def obtenir_annee(db: AsyncSession, annee: int) -> AnneeBudget:
             detail=f"Aucune donnee budgetaire disponible pour l'annee {annee}.",
         )
     return annee_budget
+
+
+async def obtenir_derniere_annee_disponible(db: AsyncSession) -> AnneeBudget:
+    """Retourne l'agregat budgetaire de la derniere annee disponible en base.
+
+    Utilise par le module Budget personnalise (Module 5) pour ventiler la
+    contribution individuelle estimee au prorata des depenses reelles de la
+    derniere annee ingeree.
+    """
+    result = await db.execute(select(func.max(AnneeBudget.annee)))
+    derniere_annee = result.scalar_one_or_none()
+    if derniere_annee is None:
+        raise ProblemDetailException(
+            title="Aucune donnee budgetaire disponible",
+            status=404,
+            detail="Aucune annee budgetaire n'est disponible en base.",
+        )
+    return await obtenir_annee(db, derniere_annee)
 
 
 async def lister_historique(db: AsyncSession, de: int | None, a: int | None) -> list[AnneeBudget]:
