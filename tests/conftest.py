@@ -26,6 +26,15 @@ async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
     defaut garderait des connexions asyncpg attachees a un loop deja ferme.
     """
     settings = get_settings()
+    db_name = settings.database_url.rsplit("/", 1)[-1]
+    if "test" not in db_name.lower():
+        raise RuntimeError(
+            f"DATABASE_URL pointe vers '{db_name}', qui ne contient pas 'test'. "
+            "Ce fixture fait un DROP de toutes les tables en teardown : lancer les "
+            "tests contre la base de dev (docker-compose, 'budgetcitoyen') detruirait "
+            "les vraies donnees ingerees. Utilise une base dediee, ex. "
+            "'budgetcitoyen_test' (meme convention que la CI, voir .github/workflows/ci.yml)."
+        )
     engine = create_async_engine(settings.database_url, poolclass=NullPool)
 
     async with engine.begin() as conn:
@@ -37,6 +46,21 @@ async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
         await conn.run_sync(Base.metadata.drop_all)
 
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
+    """Session SQLAlchemy sur la meme base de test que `async_client` (meme engine).
+
+    Permet de seeder des donnees (Mission/Programme/Action/Depense/Recette/...)
+    avant d'appeler l'API via `async_client`: les deux fixtures partagent le
+    meme `db_engine` (donc la meme base Postgres de test), seul le
+    `async_sessionmaker` est recree ici. Les tests doivent `commit()`
+    explicitement apres insertion.
+    """
+    session_maker = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with session_maker() as session:
+        yield session
 
 
 @pytest_asyncio.fixture
