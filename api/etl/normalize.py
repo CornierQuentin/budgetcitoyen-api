@@ -482,6 +482,49 @@ def normalize_depenses_2020(
     return out
 
 
+def normalize_depenses_2018(csv_text: str, annee: int = 2018) -> list[DepenseRecord]:
+    """Normalise le format 2018: un seul fichier CSV, BG+CAS+CCF deja fusionnes.
+
+    A la difference du format "detaillee" 2021-2022 (colonnes calculees "AE
+    ( T2 + HT2) LFI" / "CP ( T2 + HT2) LFI", qui totalisent deja titre 2 +
+    hors titre 2), ce fichier expose directement les montants finaux par
+    ligne categorie/titre dans les colonnes `AE LFI 2018`/`CP LFI 2018`, sans
+    decomposition a recombiner: `aggregate_depenses` se charge de sommer ces
+    lignes (une par categorie de depense, ex "21 - Remunerations d'activite")
+    au niveau de l'action.
+
+    Le perimetre budgetaire n'est pas porte par une colonne 'Type Mission'
+    (BG/CAS/CCF/BA en 2 lettres, comme 2021-2022) mais par 'Type de Budget
+    (Hors Budgets annexes)' (valeur texte, comme le dataset JSON 2019):
+    seule la valeur 'Budget général' est retenue, les 'Comptes d'affectation
+    speciale' et 'Comptes de concours financiers' presents dans ce meme
+    fichier sont exclus - coherent avec toutes les autres annees deja en
+    base, qui ne couvrent elles aussi que le budget general.
+    """
+    out: list[DepenseRecord] = []
+    for row in csv.DictReader(io.StringIO(csv_text), delimiter=";"):
+        if row.get("Type de Budget (Hors Budgets annexes)") != "Budget général":
+            continue
+        programme_code = row["Code Programme"]
+        # Uniformise le format du code action ("PPP-AA") avec les autres
+        # generations de source, qui prefixent deja par le code programme.
+        action_code = f"{programme_code}-{row['Code Action']}"
+        out.append(
+            DepenseRecord(
+                annee=annee,
+                mission_code=row["Code Mission"],
+                mission_libelle=row["Mission"],
+                programme_code=programme_code,
+                programme_libelle=row["Programme"],
+                action_code=action_code,
+                action_libelle=row["Action"],
+                ae=clean_montant(row.get("AE LFI 2018")),
+                cp=clean_montant(row.get("CP LFI 2018")),
+            )
+        )
+    return out
+
+
 def normalize_depenses_attachment_detaillee(csv_text: str, annee: int) -> list[DepenseRecord]:
     """Normalise le format "detaillee" 2021-2022: un seul fichier, libelles inclus.
 

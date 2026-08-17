@@ -4,6 +4,10 @@ Portail source: data.economie.gouv.fr (OpenDataSoft v2.1). Le format des
 donnees "depenses" change de generation selon l'annee - voir DEPENSES_DATASETS
 et le docstring de chaque normaliseur dans `api.etl.normalize`:
 
+- 2018: un seul fichier CSV en piece jointe, BG+CAS+CCF deja fusionnes dans
+  un meme fichier (filtre sur 'Type de Budget (Hors Budgets annexes)' ==
+  'Budget général', comme 2019), montants finaux directs (pas de
+  decomposition T2/HT2 comme 2021-2022).
 - 2019: API records JSON (dataset dedie, colonnes prefixees "code_"/annee_lfi).
 - 2020: deux fichiers CSV en piece jointe (nomenclature + credits) a joindre.
 - 2021-2022: un seul fichier CSV "detaillee" en piece jointe (libelles inclus).
@@ -42,17 +46,22 @@ DEPENSES_DATASETS_RECORDS: dict[int, str] = {
     2025: "plf25-depenses-2025-selon-destination",
 }
 
-# Depenses: datasets a pieces jointes (attachments) pour 2020-2022, dont il
-# faut resoudre dynamiquement l'URL exacte via l'endpoint catalog dataset.
+# Depenses: datasets a pieces jointes (attachments) pour 2018 et 2020-2022,
+# dont il faut resoudre dynamiquement l'URL exacte via l'endpoint catalog
+# dataset.
 DEPENSES_DATASETS_ATTACHMENTS: dict[int, str] = {
+    2018: "loi-de-finances-initiale-pour-2018-lfi-2018",
     2020: "projet-de-loi-de-finances-initiale-pour-2020-lfi-2020",
     2021: "projet-de-loi-de-finances-initiale-pour-2021-lfi-2021",
     2022: "projet-de-loi-de-finances-initiale-pour-2022-lfi-2022",
 }
 
 # Identifiants des pieces jointes CSV a utiliser au sein de chaque dataset
-# 2020-2022 (2020: deux fichiers a joindre : nomenclature + credits).
+# 2018/2020-2022 (2020: deux fichiers a joindre : nomenclature + credits).
 DEPENSES_ATTACHMENT_IDS: dict[int, dict[str, str]] = {
+    2018: {
+        "detaillee": "lfi_2018_act_cat_tit_bg_cas_ccf_csv",
+    },
     2020: {
         "nomenclature": "lfi2020_nomenclature_csv",
         "credits": "lfi2020_credits_csv",
@@ -66,7 +75,7 @@ DEPENSES_ATTACHMENT_IDS: dict[int, dict[str, str]] = {
 }
 
 # Toutes les annees de depenses couvertes par cette passe d'ingestion.
-DEPENSES_ANNEES: tuple[int, ...] = (2019, 2020, 2021, 2022, 2023, 2024, 2025)
+DEPENSES_ANNEES: tuple[int, ...] = (2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025)
 
 # --------------------------------------------------------------------------
 # Recettes: seules 2024 et 2025 disposent d'un dataset "recettes du budget
@@ -285,7 +294,7 @@ def default_depenses_source_url(annee: int) -> str | None:
     if annee == 2020:
         dataset_id = DEPENSES_DATASETS_ATTACHMENTS[2020]
         return attachment_url(dataset_id, DEPENSES_ATTACHMENT_IDS[2020]["credits"])
-    if annee in (2021, 2022):
+    if annee in (2018, 2021, 2022):
         dataset_id = DEPENSES_DATASETS_ATTACHMENTS[annee]
         return attachment_url(dataset_id, DEPENSES_ATTACHMENT_IDS[annee]["detaillee"])
     return None
