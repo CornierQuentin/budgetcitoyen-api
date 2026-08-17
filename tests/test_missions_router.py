@@ -1,6 +1,7 @@
 """Tests du router /api/v1/missions."""
 
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.models.action import Action
@@ -153,3 +154,136 @@ async def test_detail_mission_inexistante_retourne_404_rfc7807(async_client: Asy
     assert response.headers["content-type"] == "application/problem+json"
     body = response.json()
     assert body["status"] == 404
+
+
+async def test_detail_mission_avec_annee_inexistante_pour_ce_slug_retourne_404(
+    async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Le slug existe (une autre annee), mais pas pour l'annee demandee explicitement."""
+    await _seed_mission_justice(db_session)
+
+    response = await async_client.get("/api/v1/missions/justice/detail", params={"annee": 1999})
+
+    assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["status"] == 404
+
+
+async def _seed_mission_justice_deux_annees(db_session: AsyncSession) -> None:
+    """Seede la mission Justice sur deux annees distinctes (2023 et 2024)."""
+    db_session.add_all(
+        [
+            Mission(
+                slug="justice",
+                nom_normalise="justice",
+                nom_officiel="Justice",
+                annee=2023,
+                code_mission="JA",
+            ),
+            Mission(
+                slug="justice",
+                nom_normalise="justice",
+                nom_officiel="Justice",
+                annee=2024,
+                code_mission="JA",
+            ),
+            Mission(
+                slug="justice",
+                nom_normalise="justice",
+                nom_officiel="Justice",
+                annee=2025,
+                code_mission="JA",
+            ),
+        ]
+    )
+    await db_session.commit()
+
+
+async def test_historique_mission_sans_filtre_retourne_toutes_les_annees(
+    async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _seed_mission_justice_deux_annees(db_session)
+
+    response = await async_client.get("/api/v1/missions/justice/historique")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["annee"] for item in body] == [2023, 2024, 2025]
+
+
+async def test_historique_mission_filtre_par_plage_de_a(
+    async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _seed_mission_justice_deux_annees(db_session)
+
+    response = await async_client.get(
+        "/api/v1/missions/justice/historique", params={"de": 2024, "a": 2024}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["annee"] for item in body] == [2024]
+
+
+async def test_historique_mission_inexistante_retourne_liste_vide(
+    async_client: AsyncClient,
+) -> None:
+    """Contrairement a /missions/{slug}, l'historique d'un slug inconnu n'est pas une 404."""
+    response = await async_client.get("/api/v1/missions/inexistante/historique")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+async def test_obtenir_programme_retourne_200(
+    async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _seed_mission_justice(db_session)
+    result = await db_session.execute(select(Programme).where(Programme.code == "JA-P1"))
+    programme = result.scalar_one()
+
+    response = await async_client.get(f"/api/v1/programmes/{programme.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["code"] == "JA-P1"
+    assert body["annee"] == ANNEE_REFERENCE
+
+
+async def test_obtenir_programme_avec_annee_correcte_retourne_200(
+    async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    await _seed_mission_justice(db_session)
+    result = await db_session.execute(select(Programme).where(Programme.code == "JA-P1"))
+    programme = result.scalar_one()
+
+    response = await async_client.get(
+        f"/api/v1/programmes/{programme.id}", params={"annee": ANNEE_REFERENCE}
+    )
+
+    assert response.status_code == 200
+
+
+async def test_obtenir_programme_inexistant_retourne_404_rfc7807(
+    async_client: AsyncClient,
+) -> None:
+    response = await async_client.get("/api/v1/programmes/999999")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["status"] == 404
+
+
+async def test_obtenir_programme_avec_annee_incorrecte_retourne_404(
+    async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Le programme existe, mais pas pour l'annee demandee: doit rester une 404."""
+    await _seed_mission_justice(db_session)
+    result = await db_session.execute(select(Programme).where(Programme.code == "JA-P1"))
+    programme = result.scalar_one()
+
+    response = await async_client.get(f"/api/v1/programmes/{programme.id}", params={"annee": 1999})
+
+    assert response.status_code == 404

@@ -82,6 +82,43 @@ async def _seed_annee_avec_deux_missions(db_session: AsyncSession) -> None:
     await db_session.commit()
 
 
+async def test_aucune_annee_budgetaire_disponible_retourne_404_rfc7807(
+    async_client: AsyncClient,
+) -> None:
+    """Aucune donnee `annee_budget` en base: pas d'annee de reference pour la ventilation."""
+    response = await async_client.get("/api/v1/budget-perso", params={"revenu_net": 2000})
+
+    assert response.status_code == 404
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["status"] == 404
+
+
+async def test_depenses_nettes_nulles_donne_repartition_vide(
+    async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Si `depenses_nettes` de l'annee de reference est 0, la ventilation par mission
+    (qui proratise sur ce total) reste une liste vide plutot qu'une division par zero."""
+    db_session.add(
+        AnneeBudget(
+            annee=ANNEE_REFERENCE,
+            depenses_nettes=0.0,
+            recettes_nettes=0.0,
+            deficit=0.0,
+            dette_pib=None,
+            source_url="https://example.test/annee",
+        )
+    )
+    await db_session.commit()
+
+    response = await async_client.get("/api/v1/budget-perso", params={"revenu_net": 2000})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["repartition"] == []
+    assert body["contribution_totale_estimee"] > 0
+
+
 async def test_parametre_manquant_retourne_422(async_client: AsyncClient) -> None:
     response = await async_client.get("/api/v1/budget-perso")
 
