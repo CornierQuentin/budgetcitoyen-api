@@ -88,16 +88,30 @@ async def upsert_missions(
 
 
 async def upsert_mission_aliases(
-    db: AsyncSession, rows: Sequence[tuple[MissionAliasRow, int]]
+    db: AsyncSession, rows: Sequence[tuple[MissionAliasRow, int]], annees: Sequence[int]
 ) -> None:
-    """Reconstruit integralement la table mission_alias a partir des alias fournis.
+    """Reconstruit la portion de mission_alias couverte par `annees` a partir des alias fournis.
 
-    `rows` contient des couples (alias, mission_id) deja resolus. La table
-    est entierement recalculee a chaque run (pas de cle naturelle stable
-    pour un upsert cible), ce qui reste idempotent puisqu'elle est purement
-    derivee des donnees de depenses.
+    `rows` contient des couples (alias, mission_id) deja resolus, calcules
+    par `api.etl.normalize.build_mission_alias_rows` a partir des SEULES
+    annees traitees par le run courant (`annees`). Un alias genere par cette
+    passe cible toujours un `Mission` dont `annee` est dans `annees` (son
+    `mission_id` provient de `annee_cible = max(annees observees)`, qui est
+    necessairement une des annees fournies a `build_mission_alias_rows` -
+    voir sa docstring): la suppression prealable est donc scopee aux
+    `mission_alias` dont le `mission_id` pointe vers l'une de ces annees,
+    PAS un `delete(MissionAlias)` sans condition.
+
+    Sans ce filtre, un run partiel (ex: `--depenses-only --annees 2018`)
+    effacerait la table entiere avant de ne reinserer QUE les alias de 2018,
+    detruisant silencieusement les alias deja corrects des autres annees
+    (bug constate a l'execution reelle lors de l'ajout de l'annee 2018 - cf.
+    JOURNAL/PR correspondante). Reste idempotent sur re-execution des memes
+    `annees` (purement derive des donnees de depenses de ces annees-la).
     """
-    await db.execute(delete(MissionAlias))
+    if annees:
+        cible = select(Mission.id).where(Mission.annee.in_(annees))
+        await db.execute(delete(MissionAlias).where(MissionAlias.mission_id.in_(cible)))
     if not rows:
         return
     values = [
@@ -240,7 +254,7 @@ async def get_remboursements_degrevements_cp(db: AsyncSession, annee: int) -> fl
     fiable.
 
     Retourne 0.0 si aucune depense n'est chargee pour cette mission/annee
-    (ex: 2016-2018, hors perimetre du pipeline "depenses" - `annee_budget`
+    (ex: 2016-2017, hors perimetre du pipeline "depenses" - `annee_budget`
     ne sera de toute facon pas calcule pour ces annees, cf.
     `recalculer_annee_budget`, qui exige depenses ET recettes).
     """

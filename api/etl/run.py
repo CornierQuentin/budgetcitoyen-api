@@ -1,10 +1,10 @@
 """CLI d'orchestration du pipeline ETL: telechargement -> normalisation -> chargement.
 
 Usage:
-    python -m api.etl.run [--annees 2019-2025]
+    python -m api.etl.run [--annees 2018-2025]
         [--depenses-only | --recettes-only | --indicateurs-only]
 
-Ingere les depenses de l'Etat (budget general) pour 2019-2025, les recettes
+Ingere les depenses de l'Etat (budget general) pour 2018-2025, les recettes
 du budget general pour 2016-2020/2022-2025 (deux sources cohabitent: le
 portail data.economie.gouv.fr pour 2024-2025, et les rapports annuels "Le
 budget de l'Etat en <annee>" de la Cour des comptes pour 2016-2020 et
@@ -125,6 +125,12 @@ async def _fetch_depenses_annee(
         raw = await _fetch_all_records(client, dataset_id)
         records = normalize.normalize_depenses_records_json(raw, annee)
         source_url = sources.records_url(dataset_id)
+    elif annee == 2018:
+        dataset_id = sources.DEPENSES_DATASETS_ATTACHMENTS[2018]
+        attachment_id = sources.DEPENSES_ATTACHMENT_IDS[2018]["detaillee"]
+        text = await _fetch_attachment_text(client, dataset_id, attachment_id)
+        records = normalize.normalize_depenses_2018(text, annee)
+        source_url = sources.attachment_url(dataset_id, attachment_id)
     elif annee == 2020:
         dataset_id = sources.DEPENSES_DATASETS_ATTACHMENTS[2020]
         ids = sources.DEPENSES_ATTACHMENT_IDS[2020]
@@ -169,7 +175,7 @@ async def _charger_depenses(
     mission_ids = await loader.upsert_missions(db, mission_rows)
 
     alias_with_ids = [(alias, mission_ids[(alias.slug, alias.annee_cible)]) for alias in alias_rows]
-    await loader.upsert_mission_aliases(db, alias_with_ids)
+    await loader.upsert_mission_aliases(db, alias_with_ids, annees)
 
     for annee in annees:
         aggregats = aggregats_par_annee[annee]
@@ -298,7 +304,7 @@ async def _charger_recettes_cour_des_comptes(
     `TypeRecette.AUTRES` (le seul bucket "fourre-tout" du modele actuel -
     cf. `TypeRecette`), afin que la somme totale des recettes redevienne
     comparable a la base brute des depenses. Vaut 0.0 (sans effet) pour une
-    annee sans depenses chargees (2016-2018): `annee_budget` n'y sera de
+    annee sans depenses chargees (2016-2017): `annee_budget` n'y sera de
     toute facon pas calcule (cf. `recalculer_annee_budget`).
     """
     tous_les_aggregats: list[normalize.RecetteAggregat] = []
@@ -454,7 +460,7 @@ async def run_etl(
     ]
     for a in hors_perimetre:
         logger.warning(
-            "annee %d hors perimetre de cette passe d'ingestion (depenses: 2019-2025, "
+            "annee %d hors perimetre de cette passe d'ingestion (depenses: 2018-2025, "
             "recettes: 2016-2020/2022-2025), ignoree",
             a,
         )
@@ -511,7 +517,7 @@ async def run_etl(
             # ete chargees lors d'un run precedent recalculera
             # `recettes_nettes` avec un PSR par defaut de 0.0 (non deduit) -
             # cf. docstring de `loader.recalculer_annee_budget`. Non
-            # bloquant pour cette passe (le run complet 2019-2025 traite
+            # bloquant pour cette passe (le run complet 2018-2025 traite
             # toujours depenses+recettes ensemble), documente pour une
             # passe future si des runs partiels reguliers sont introduits.
             if depenses or recettes:
@@ -545,8 +551,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--annees",
-        default="2019-2025",
-        help="Plage/liste d'annees (ex: '2019-2025', '2024,2025'). Defaut: 2019-2025.",
+        default="2018-2025",
+        help="Plage/liste d'annees (ex: '2018-2025', '2024,2025'). Defaut: 2018-2025.",
     )
     groupe = parser.add_mutually_exclusive_group()
     groupe.add_argument("--depenses-only", action="store_true", help="Ne charger que les depenses.")

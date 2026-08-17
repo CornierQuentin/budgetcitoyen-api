@@ -18,6 +18,7 @@ from api.etl.normalize import (
     clean_montant,
     extract_non_fiscal_et_psr_cour_des_comptes,
     extract_prelevements_sur_recettes,
+    normalize_depenses_2018,
     normalize_depenses_2020,
     normalize_depenses_attachment_detaillee,
     normalize_depenses_records_json,
@@ -171,6 +172,38 @@ def test_normalize_depenses_records_json_2024_schema_ae_plf() -> None:
     assert len(aggregats) == 1
     assert aggregats[0].ae == pytest.approx(76099174.0 + 5000000.0)
     assert aggregats[0].cp == pytest.approx(74172725.0 + 5000000.0)
+
+
+# ---------------------------------------------------------------------------
+# Depenses 2018: fichier unique, BG+CAS+CCF fusionnes
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_depenses_2018_filtre_budget_general_et_somme_categories() -> None:
+    csv_text = _load_csv_cp1252("lfi2018_act_cat_tit_sample.csv")
+    records = normalize_depenses_2018(csv_text, annee=2018)
+
+    # 7 lignes "Budget général" dans la fixture (5 categories AA/105/01 + 2
+    # categories AB/216/01), 1 ligne CAS et 1 ligne CCF exclues.
+    assert len(records) == 7
+    assert all(r.annee == 2018 for r in records)
+    assert {r.mission_code for r in records} == {"AA", "AB"}
+
+    aggregats = aggregate_depenses(records)
+    par_cle = {(a.mission_code, a.programme_code, a.action_code): a for a in aggregats}
+    # 2 actions distinctes: AA/105/01 (5 categories sommees) et AB/216/01 (2
+    # categories sommees).
+    assert len(aggregats) == 2
+
+    action_aa = par_cle[("AA", "105", "105-01")]
+    assert action_aa.ae == pytest.approx(42355399 + 21483744 + 1249791 + 21982846 + 2783145)
+    assert action_aa.cp == pytest.approx(42355399 + 21483744 + 1249791 + 21982846 + 2783145)
+    assert action_aa.mission_libelle == "Action extérieure de l'État"
+    assert action_aa.action_libelle == "Coordination de l'action diplomatique"
+
+    action_ab = par_cle[("AB", "216", "216-01")]
+    assert action_ab.ae == pytest.approx(194765112 + 130104072)
+    assert action_ab.cp == pytest.approx(194765112 + 130104072)
 
 
 # ---------------------------------------------------------------------------
