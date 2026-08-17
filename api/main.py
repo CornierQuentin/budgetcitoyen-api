@@ -20,6 +20,7 @@ from api.routers import (
     budget_perso,
     comparateur,
     health,
+    indicateurs,
     marches,
     missions,
     recettes,
@@ -62,6 +63,7 @@ def create_app() -> FastAPI:
     app.include_router(comparateur.router, prefix="/api/v1")
     app.include_router(budget_perso.router, prefix="/api/v1")
     app.include_router(marches.router, prefix="/api/v1")
+    app.include_router(indicateurs.router, prefix="/api/v1")
 
     return app
 

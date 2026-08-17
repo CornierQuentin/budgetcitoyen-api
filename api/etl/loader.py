@@ -22,6 +22,7 @@ from api.etl.normalize import DepenseAggregat, MissionAliasRow, MissionYearRow, 
 from api.models.action import Action
 from api.models.annee_budget import AnneeBudget
 from api.models.depense import Depense
+from api.models.indicateur_macro import IndicateurMacro
 from api.models.mission import Mission
 from api.models.mission_alias import MissionAlias
 from api.models.programme import Programme
@@ -304,3 +305,51 @@ async def recalculer_annee_budget(
         deficit,
     )
     return annee_budget
+
+
+async def upsert_indicateurs_macro(
+    db: AsyncSession,
+    pib: dict[int, float],
+    population: dict[int, int],
+    source_pib_url: dict[int, str],
+    source_population_url: str,
+) -> None:
+    """Insere ou met a jour les indicateurs macro, upsert idempotent sur `annee`.
+
+    Charge l'union des annees presentes dans `pib` OU `population`: une
+    annee qui n'a que l'une des deux valeurs garde `NULL` pour l'autre (pas
+    de valeur factice). `source_pib_url` est un mapping {annee: url} plutot
+    qu'une URL unique, car le PIB nominal provient de deux sources
+    distinctes selon l'annee: le CSV principal (1949-2022) et, pour
+    2023-2025, une edition Insee Premiere differente par annee (voir
+    `api.etl.sources.PIB_CSV_URL` et `PIB_COMPLEMENT_XLSX_URLS`). Pour une
+    annee presente uniquement dans `population` (pas de valeur PIB),
+    `source_pib_url` n'a logiquement pas d'entree: `source_pib_url` reste
+    alors `NULL` pour cette ligne.
+    """
+    annees = sorted(set(pib) | set(population))
+    if not annees:
+        return
+
+    values = [
+        {
+            "annee": annee,
+            "pib_courant": pib.get(annee),
+            "population": population.get(annee),
+            "source_pib_url": source_pib_url.get(annee) if annee in pib else None,
+            "source_population_url": source_population_url if annee in population else None,
+        }
+        for annee in annees
+    ]
+    stmt = pg_insert(IndicateurMacro).values(values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[IndicateurMacro.annee],
+        set_={
+            "pib_courant": stmt.excluded.pib_courant,
+            "population": stmt.excluded.population,
+            "source_pib_url": stmt.excluded.source_pib_url,
+            "source_population_url": stmt.excluded.source_population_url,
+        },
+    )
+    await db.execute(stmt)
+    logger.info("indicateurs_macro upsertes: %d", len(values))

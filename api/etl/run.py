@@ -1,13 +1,15 @@
 """CLI d'orchestration du pipeline ETL: telechargement -> normalisation -> chargement.
 
 Usage:
-    python -m api.etl.run [--annees 2019-2025] [--depenses-only] [--recettes-only]
+    python -m api.etl.run [--annees 2019-2025]
+        [--depenses-only | --recettes-only | --indicateurs-only]
 
-Ingere les depenses de l'Etat (budget general) pour 2019-2025 et les
-recettes du budget general pour 2024-2025 (seules annees disponibles sous
-forme structuree sur data.economie.gouv.fr - trou de donnees reel pour
-2015-2023, documente dans le README/JOURNAL du projet, pas une limitation de
-ce script).
+Ingere les depenses de l'Etat (budget general) pour 2019-2025, les recettes
+du budget general pour 2024-2025 (seules annees disponibles sous forme
+structuree sur data.economie.gouv.fr - trou de donnees reel pour 2015-2023,
+documente dans le README/JOURNAL du projet, pas une limitation de ce
+script), et les indicateurs macro (PIB nominal, population - voir
+`_charger_indicateurs`).
 """
 
 from __future__ import annotations
@@ -227,6 +229,48 @@ async def _charger_recettes(
 
 
 # ---------------------------------------------------------------------------
+# Etape indicateurs macro (PIB nominal, population)
+# ---------------------------------------------------------------------------
+
+
+async def _charger_indicateurs(db: AsyncSession, client: httpx.AsyncClient) -> None:
+    """Telecharge, normalise et charge le PIB nominal et la population.
+
+    A la difference des depenses/recettes, ces sources ne sont pas
+    decoupees par annee (un CSV et un xlsx couvrant chacun tout
+    l'historique disponible): cette etape recharge donc systematiquement
+    tout l'historique a chaque run, independamment du filtre `--annees`.
+    """
+    pib_csv = await _get_bytes(client, sources.PIB_CSV_URL)
+    pib = normalize.normalize_pib_csv(pib_csv)
+    source_pib_url = {annee: sources.PIB_CSV_URL for annee in pib}
+    logger.info("PIB (CSV principal): %d annees normalisees (jusqu'a %d)", len(pib), max(pib))
+
+    for annee, url in sources.PIB_COMPLEMENT_XLSX_URLS.items():
+        contenu = await _get_bytes(client, url)
+        pib[annee] = normalize.normalize_pib_complement_insee_premiere(contenu, annee)
+        source_pib_url[annee] = url
+    logger.info(
+        "PIB (complement Insee Premiere): %d annees ajoutees (%s)",
+        len(sources.PIB_COMPLEMENT_XLSX_URLS),
+        sorted(sources.PIB_COMPLEMENT_XLSX_URLS),
+    )
+
+    population_xlsx = await _get_bytes(client, sources.POPULATION_XLSX_URL)
+    population = normalize.normalize_population_xlsx(population_xlsx)
+    logger.info(
+        "population: %d annees normalisees (%d-%d)",
+        len(population),
+        min(population),
+        max(population),
+    )
+
+    await loader.upsert_indicateurs_macro(
+        db, pib, population, source_pib_url, sources.POPULATION_XLSX_URL
+    )
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -247,7 +291,9 @@ def _parse_annees(spec: str) -> list[int]:
     return sorted(annees)
 
 
-async def run_etl(annees: Iterable[int], *, depenses: bool, recettes: bool) -> None:
+async def run_etl(
+    annees: Iterable[int], *, depenses: bool, recettes: bool, indicateurs: bool = True
+) -> None:
     annees_list = sorted(set(annees))
     depenses_annees = [a for a in annees_list if a in sources.DEPENSES_ANNEES] if depenses else []
     recettes_annees = [a for a in annees_list if a in sources.RECETTES_ANNEES] if recettes else []
@@ -261,27 +307,47 @@ async def run_etl(annees: Iterable[int], *, depenses: bool, recettes: bool) -> N
         logger.warning("annee %d hors perimetre de cette passe d'ingestion (2019-2025), ignoree", a)
 
     logger.info(
-        "demarrage ETL: depenses=%s recettes=%s",
+        "demarrage ETL: depenses=%s recettes=%s indicateurs=%s",
         depenses_annees or "aucune",
         recettes_annees or "aucune",
+        indicateurs,
     )
 
     source_url_par_annee: dict[int, str] = {}
     psr_par_annee: dict[int, float] = {}
 
-    async with httpx.AsyncClient() as client, async_session_maker() as db:
+    # follow_redirects=True: les ressources data.gouv.fr (PIB nominal) sont
+    # exposees via une URL stable qui redirige (302) vers l'hebergement
+    # statique reel du fichier - a la difference des endpoints
+    # data.economie.gouv.fr utilises pour depenses/recettes, qui repondent
+    # directement en 200.
+    async with (
+        httpx.AsyncClient(follow_redirects=True) as client,
+        async_session_maker() as db,
+    ):
         try:
             if depenses_annees:
                 source_url_par_annee = await _charger_depenses(db, client, depenses_annees)
             if recettes_annees:
                 psr_par_annee = await _charger_recettes(db, client, recettes_annees)
+            if indicateurs:
+                await _charger_indicateurs(db, client)
 
             # Recalcule l'agregat annee_budget pour toute annee demandee ou
             # depenses ET recettes sont desormais presentes en base (que ce
             # soit charge lors de ce run ou d'un run precedent).
             #
-            # Limitation connue: `psr_par_annee` ne contient que les PSR des
-            # annees de recettes traitees PENDANT ce run. Un run
+            # Uniquement si `depenses` ou `recettes` est demande par ce run:
+            # `--indicateurs-only` ne doit PAS toucher `annee_budget` (hors
+            # de son perimetre). Sans cette garde, ce recalcul s'executerait
+            # quand meme pour toute annee de `annees_list` deja chargee lors
+            # d'un run precedent - avec un PSR par defaut de 0.0 (non
+            # deduit, cf. limitation ci-dessous), corrompant silencieusement
+            # `recettes_nettes`/`deficit` d'une annee deja correctement
+            # calculee (constate a l'execution reelle: cf. JOURNAL).
+            #
+            # Limitation connue (inchangee): `psr_par_annee` ne contient que
+            # les PSR des annees de recettes traitees PENDANT ce run. Un run
             # `--depenses-only` portant sur une annee dont les recettes ont
             # ete chargees lors d'un run precedent recalculera
             # `recettes_nettes` avec un PSR par defaut de 0.0 (non deduit) -
@@ -289,15 +355,16 @@ async def run_etl(annees: Iterable[int], *, depenses: bool, recettes: bool) -> N
             # bloquant pour cette passe (le run complet 2019-2025 traite
             # toujours depenses+recettes ensemble), documente pour une
             # passe future si des runs partiels reguliers sont introduits.
-            for annee in annees_list:
-                source_url = source_url_par_annee.get(annee) or sources.default_depenses_source_url(
-                    annee
-                )
-                if source_url is None:
-                    continue
-                await loader.recalculer_annee_budget(
-                    db, annee, source_url, psr_par_annee.get(annee, 0.0)
-                )
+            if depenses or recettes:
+                for annee in annees_list:
+                    source_url = source_url_par_annee.get(
+                        annee
+                    ) or sources.default_depenses_source_url(annee)
+                    if source_url is None:
+                        continue
+                    await loader.recalculer_annee_budget(
+                        db, annee, source_url, psr_par_annee.get(annee, 0.0)
+                    )
 
             await db.commit()
             logger.info("ETL termine avec succes, transaction validee")
@@ -325,13 +392,19 @@ def main(argv: list[str] | None = None) -> None:
     groupe = parser.add_mutually_exclusive_group()
     groupe.add_argument("--depenses-only", action="store_true", help="Ne charger que les depenses.")
     groupe.add_argument("--recettes-only", action="store_true", help="Ne charger que les recettes.")
+    groupe.add_argument(
+        "--indicateurs-only",
+        action="store_true",
+        help="Ne charger que les indicateurs macro (PIB, population).",
+    )
     args = parser.parse_args(argv)
 
     annees = _parse_annees(args.annees)
-    depenses = not args.recettes_only
-    recettes = not args.depenses_only
+    depenses = not (args.recettes_only or args.indicateurs_only)
+    recettes = not (args.depenses_only or args.indicateurs_only)
+    indicateurs = not (args.depenses_only or args.recettes_only)
 
-    asyncio.run(run_etl(annees, depenses=depenses, recettes=recettes))
+    asyncio.run(run_etl(annees, depenses=depenses, recettes=recettes, indicateurs=indicateurs))
 
 
 if __name__ == "__main__":

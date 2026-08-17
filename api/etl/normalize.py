@@ -36,6 +36,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
+import pandas as pd
+
 from api.etl.sources import CODE_LIGNE_RECETTE_VERS_TYPE
 from api.models.recette import TypeRecette
 
@@ -662,3 +664,112 @@ def aggregate_recettes(records: list[RecetteRecord]) -> list[RecetteAggregat]:
         RecetteAggregat(annee=annee, type=type_, montant_brut=total, montant_net=total)
         for (annee, type_), total in totaux.items()
     ]
+
+
+# ---------------------------------------------------------------------------
+# Indicateurs macro: PIB nominal et population
+# ---------------------------------------------------------------------------
+
+
+def normalize_pib_csv(content: bytes | str) -> dict[int, float]:
+    """Normalise le CSV PIB nominal principal (colonnes "annee,pib").
+
+    La source (voir `api.etl.sources.PIB_CSV_URL`) exprime `pib` en MILLIONS
+    d'euros courants ("PIB en valeur", prix courants - PAS un volume/prix
+    chaines): convertit en EUROS (`* 1_000_000`), coherent avec
+    `depense.ae`/`depense.cp` deja en euros. Ne couvre que 1949-2022 (serie
+    source arretee, cf. docstring de `PIB_CSV_URL`).
+    """
+    text = content.decode("utf-8") if isinstance(content, bytes) else content
+    out: dict[int, float] = {}
+    for row in csv.DictReader(io.StringIO(text)):
+        annee = int(row["annee"])
+        pib_millions = clean_montant(row["pib"])
+        out[annee] = pib_millions * 1_000_000
+    return out
+
+
+def normalize_pib_complement_insee_premiere(content: bytes, annee: int) -> float:
+    """Extrait le PIB nominal (euros courants) d'une edition "Insee Premiere -
+    Les comptes de la Nation en <annee>" (voir
+    `api.etl.sources.PIB_COMPLEMENT_XLSX_URLS`), qui complete le trou
+    2023-2025 de `normalize_pib_csv`.
+
+    La feuille "Figure 1 - Le PIB et les operations sur les biens et les
+    services" contient une ligne "Produit interieur brut (PIB)" dont la
+    colonne "En milliards d'euros" donne le NIVEAU nominal (prix courants,
+    base 2020) du PIB pour la derniere annee couverte par l'edition - a ne
+    pas confondre avec les colonnes "Evolution en volume" (taux de
+    croissance en volume, prix chaines) qui la precedent dans le tableau.
+    Structure observee, identique sur les 3 editions 2023/2024/2025
+    (IP1997/IP2053/IP2105): colonne A=libelle, B/C/D=evolutions en volume
+    (3 dernieres annees), E="En milliards d'euros" (niveau, derniere
+    annee), F/G/H=evolution prix/valeur/contribution.
+
+    Leve `ValueError` si la structure attendue n'est pas retrouvee (ligne
+    PIB introuvable) ou si l'annee d'en-tete du tableau ne correspond pas a
+    `annee` (garde-fou contre une source qui aurait change de format sans
+    prevenir), plutot que de charger silencieusement une valeur erronee.
+    """
+    df = pd.read_excel(io.BytesIO(content), sheet_name="Figure 1", header=None)
+
+    annee_entete: int | None = None
+    pib_milliards: float | None = None
+    for _, row in df.iterrows():
+        valeurs = row.tolist()
+        col0 = valeurs[0]
+        col3 = valeurs[3] if len(valeurs) > 3 else None
+        if (
+            (col0 is None or (isinstance(col0, float) and pd.isna(col0)))
+            and isinstance(col3, int | float)
+            and not pd.isna(col3)
+            and col3 > 2000
+        ):
+            # Ligne d'en-tete des annees, ex: (None, 2021, 2022, 2023, "En
+            # milliards d'euros", ...) - la derniere annee (col3) est celle
+            # couverte par la colonne "niveau" (col4) plus loin sur la ligne.
+            annee_entete = int(col3)
+        if isinstance(col0, str) and col0.strip().startswith("Produit intérieur brut"):
+            pib_milliards = float(valeurs[4])
+
+    if annee_entete != annee:
+        raise ValueError(
+            f"annee {annee}: en-tete Figure 1 trouve {annee_entete!r}, attendu {annee} "
+            "(structure de la source Insee Premiere a peut-etre change)"
+        )
+    if pib_milliards is None:
+        raise ValueError(
+            f"annee {annee}: ligne 'Produit interieur brut (PIB)' introuvable dans Figure 1 "
+            "(structure de la source Insee Premiere a peut-etre change)"
+        )
+    return pib_milliards * 1_000_000_000
+
+
+def normalize_population_xlsx(content: bytes) -> dict[int, int]:
+    """Normalise le fichier population INSEE (onglet "FR", France entiere).
+
+    Voir `api.etl.sources.POPULATION_XLSX_URL`. La feuille "FR" a 3 lignes
+    d'en-tete (titre, sous-titre, puis la ligne de noms de colonnes propre)
+    avant les donnees - d'ou `header=2`. La colonne "Annee" contient soit un
+    entier (annees anciennes), soit une chaine suffixee " (p)" pour les
+    dernieres annees provisoires (ex: "2025 (p)"): le prefixe a 4 chiffres
+    est extrait dans les deux cas. La colonne "Population au 1er janvier"
+    vaut "nd " (non disponible - chaine, pas un nombre) pour les annees les
+    plus anciennes (avant 1982 dans l'edition courante): ces lignes sont
+    ignorees, tout comme les lignes de notes de bas de page en fin de
+    feuille (annee non parsable en 4 chiffres).
+    """
+    df = pd.read_excel(io.BytesIO(content), sheet_name="FR", header=2)
+    out: dict[int, int] = {}
+    for _, row in df.iterrows():
+        annee_brute = row.iloc[0]
+        population_brute = row.iloc[1]
+        if pd.isna(annee_brute):
+            continue
+        match = re.match(r"^(\d{4})", str(annee_brute).strip())
+        if not match:
+            continue
+        annee = int(match.group(1))
+        if isinstance(population_brute, int | float) and not pd.isna(population_brute):
+            out[annee] = int(population_brute)
+    return out
