@@ -16,6 +16,7 @@ from api.etl.normalize import (
     build_mission_alias_rows,
     build_mission_rows,
     clean_montant,
+    extract_non_fiscal_et_psr_cour_des_comptes,
     extract_prelevements_sur_recettes,
     normalize_depenses_2020,
     normalize_depenses_attachment_detaillee,
@@ -24,6 +25,7 @@ from api.etl.normalize import (
     normalize_pib_complement_insee_premiere,
     normalize_pib_csv,
     normalize_population_xlsx,
+    normalize_recettes_cour_des_comptes,
     normalize_recettes_records_json,
     resolve_mission_identities,
 )
@@ -39,6 +41,10 @@ def _load_json(name: str) -> list[dict]:
 
 def _load_csv_cp1252(name: str) -> str:
     return (FIXTURES / name).read_bytes().decode("cp1252")
+
+
+def _load_csv_utf8(name: str) -> str:
+    return (FIXTURES / name).read_text(encoding="utf-8")
 
 
 def _load_bytes(name: str) -> bytes:
@@ -304,6 +310,148 @@ def test_normalize_recettes_records_json_psr_sample_exclut_bien_les_psr() -> Non
     # deficit budgetaire 2025 une fois compare aux depenses (~594 Md).
     assert recettes_nettes == pytest.approx(453388248678.0)
     assert recettes_nettes / 1e9 == pytest.approx(453.4, abs=0.1)
+
+
+# ---------------------------------------------------------------------------
+# Recettes 2016-2020/2022/2023: rapports Cour des comptes ("Le budget de
+# l'Etat en <annee>"), tableau "recettes fiscales nettes par impot" +
+# "tableau d'equilibre" (recettes non fiscales, PSR)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_recettes_cour_des_comptes_2016_pandas_index_parasite() -> None:
+    """Le fichier 2016 porte une colonne d'index pandas parasite en tete de
+    chaque ligne (artefact `DataFrame.to_csv()` sans `index=False` cote
+    source) et un titre fusionne sur la premiere ligne: le parseur doit
+    localiser la colonne LFI et les libelles malgre cette structure.
+    """
+    csv_text = _load_csv_utf8("recettes_ccomptes_2016_impot_sample.csv")
+    records = normalize_recettes_cour_des_comptes(csv_text, 2016, delimiter=";")
+
+    par_type = {r.type: r.montant for r in records}
+    assert par_type[TypeRecette.IR] == pytest.approx(72.14e9)
+    assert par_type[TypeRecette.IS] == pytest.approx(32.84e9)
+    assert par_type[TypeRecette.TICPE] == pytest.approx(15.85e9)
+    assert par_type[TypeRecette.TVA] == pytest.approx(144.62e9)
+    assert par_type[TypeRecette.AUTRES] == pytest.approx(22.41e9)
+    # La ligne "Recettes nettes" (total) n'est pas un type reconnu.
+    assert len(records) == 5
+
+
+def test_normalize_recettes_cour_des_comptes_2017_libelles_net_et_ticpe_en_toutes_lettres() -> None:
+    """2017 utilise "Impot NET sur le revenu"/"...sur les societes" (pas le
+    libelle "sec" de 2016) et ecrit la TICPE en toutes lettres ("Taxe
+    interieure de consommation sur les produits energetiques") plutot que
+    l'abreviation - et sa colonne LFI n'a PAS de suffixe d'annee ("LFI" tout
+    court, contrairement a "LFI 2016"). Les lignes de sous-detail
+    "...dont ..." (valeurs "-" non numeriques dans plusieurs colonnes) ne
+    doivent pas etre confondues avec une ligne d'impot.
+    """
+    csv_text = _load_csv_utf8("recettes_ccomptes_2017_impot_sample.csv")
+    records = normalize_recettes_cour_des_comptes(csv_text, 2017, delimiter=";")
+
+    par_type = {r.type: r.montant for r in records}
+    assert par_type[TypeRecette.IR] == pytest.approx(73.4e9)
+    assert par_type[TypeRecette.IS] == pytest.approx(29.1e9)
+    assert par_type[TypeRecette.TICPE] == pytest.approx(10.6e9)
+    assert par_type[TypeRecette.TVA] == pytest.approx(149.3e9)
+    assert par_type[TypeRecette.AUTRES] == pytest.approx(30.0e9)
+    assert len(records) == 5
+
+
+def test_normalize_recettes_cour_des_comptes_2020_ignore_la_ligne_non_fiscale() -> None:
+    """Le fichier 2020 (graphique) inclut une ligne "Recettes non fiscales"
+    en plus de la decomposition par impot: elle ne doit PAS atterrir dans
+    TypeRecette.AUTRES (qui ne doit contenir QUE "Autres recettes
+    fiscales") - les recettes non fiscales sont traitees a part par
+    `extract_non_fiscal_et_psr_cour_des_comptes`. Ce fichier a aussi un
+    BOM UTF-8 et un en-tete avec cellules quotees contenant des retours a
+    la ligne (ex: '"LFI\\n2020"').
+    """
+    csv_text = _load_csv_utf8("recettes_ccomptes_2020_impot_sample.csv")
+    records = normalize_recettes_cour_des_comptes(csv_text, 2020, delimiter=";")
+
+    par_type = {r.type: r.montant for r in records}
+    assert par_type[TypeRecette.AUTRES] == pytest.approx(28.801e9)
+    assert len(records) == 5
+
+
+def test_normalize_recettes_cour_des_comptes_2022_delimiteur_virgule_et_unite_trompeuse() -> None:
+    """2022 est delimite par une virgule (pas un point-virgule) et son
+    en-tete "Designation des recettes (M.€)" est TROMPEUR: les valeurs sont
+    en realite en Md EUR (confirme par recoupement avec le total agrege),
+    pas en M EUR comme le laisserait penser le libelle - `_md_ou_m_vers_
+    euros` doit se fier a l'ordre de grandeur, pas au texte de l'en-tete.
+    La ligne "Total" ne doit pas etre comptee comme un impot.
+    """
+    csv_text = _load_csv_utf8("recettes_ccomptes_2022_impot_sample.csv")
+    records = normalize_recettes_cour_des_comptes(csv_text, 2022, delimiter=",")
+
+    par_type = {r.type: r.montant for r in records}
+    assert par_type[TypeRecette.IR] == pytest.approx(82.361e9)
+    assert par_type[TypeRecette.TVA] == pytest.approx(98.3552e9)
+    assert len(records) == 5
+    # Si l'unite avait ete lue comme M€ au lieu de Md€, ce total serait
+    # ~1000x plus petit (~287 millions au lieu de ~287 milliards).
+    assert sum(r.montant for r in records) == pytest.approx(287.5722e9)
+
+
+def test_normalize_recettes_cour_des_comptes_leve_si_colonne_lfi_introuvable() -> None:
+    with pytest.raises(ValueError, match="colonne LFI introuvable"):
+        normalize_recettes_cour_des_comptes("Impôt sur le revenu;70;71\n", 2019, delimiter=";")
+
+
+def test_extract_non_fiscal_et_psr_cour_des_comptes_2016_unite_m_euros() -> None:
+    """Le tableau d'equilibre 2016 est en M EUR (contrairement au tableau
+    "par impot" de la meme annee, en Md EUR): `_md_ou_m_vers_euros` doit
+    detecter les deux unites correctement au sein du meme millesime.
+    """
+    csv_text = _load_csv_utf8("recettes_ccomptes_2016_equilibre_sample.csv")
+    non_fiscal, psr = extract_non_fiscal_et_psr_cour_des_comptes(csv_text, 2016, delimiter=";")
+
+    assert non_fiscal == pytest.approx(15648e6)
+    assert psr.union_europeenne == pytest.approx(20169e6)
+    assert psr.collectivites == pytest.approx(47305e6)
+    assert psr.total == pytest.approx(67474e6)
+
+
+def test_extract_non_fiscal_et_psr_cour_des_comptes_2020_labels_avec_parentheses() -> None:
+    """2020 suffixe chaque libelle d'une lettre entre parentheses (ex:
+    "Recettes non fiscales (b)", "PSR au profit de l'Union européenne (c)")
+    - ne doit pas empecher le rapprochement. La ligne "Recettes fiscales
+    nettes (a)" (qui contient bien "fiscales" mais PAS "non fiscales") ne
+    doit pas etre confondue avec "Recettes non fiscales (b)".
+    """
+    csv_text = _load_csv_utf8("recettes_ccomptes_2020_equilibre_sample.csv")
+    non_fiscal, psr = extract_non_fiscal_et_psr_cour_des_comptes(csv_text, 2020, delimiter=";")
+
+    assert non_fiscal == pytest.approx(14364.273254e6)
+    assert psr.union_europeenne == pytest.approx(21480.0e6)
+    assert psr.collectivites == pytest.approx(41246.7400009999e6)
+
+
+def test_extract_non_fiscal_et_psr_cour_des_comptes_2022_libelles_abreges_ue_ct() -> None:
+    """2022 (delimite par une virgule) abrege les PSR en "UE"/pas d'abreviation
+    CT explicite dans ce fichier - le libelle complet
+    "collectivites territoriales" reste detecte via le fragment "collectivit".
+    """
+    csv_text = _load_csv_utf8("recettes_ccomptes_2022_equilibre_sample.csv")
+    non_fiscal, psr = extract_non_fiscal_et_psr_cour_des_comptes(csv_text, 2022, delimiter=",")
+
+    assert non_fiscal == pytest.approx(20177e6)
+    assert psr.union_europeenne == pytest.approx(26359e6)
+    assert psr.collectivites == pytest.approx(43241e6)
+
+
+def test_extract_non_fiscal_et_psr_cour_des_comptes_leve_si_ligne_manquante() -> None:
+    """2023 n'a pas de tableau d'equilibre exploitable (cf. `api.etl.sources.
+    RECETTES_COUR_DES_COMPTES_FICHIER_EQUILIBRE`): si on lui passait quand
+    meme le tableau "par impot" (qui n'a pas de ligne PSR/non fiscale), la
+    fonction doit lever plutot que renvoyer silencieusement des zeros.
+    """
+    csv_text = _load_csv_utf8("recettes_ccomptes_2023_impot_sample.csv")
+    with pytest.raises(ValueError, match="tableau d'equilibre Cour des comptes incomplet"):
+        extract_non_fiscal_et_psr_cour_des_comptes(csv_text, 2023, delimiter=",")
 
 
 # ---------------------------------------------------------------------------

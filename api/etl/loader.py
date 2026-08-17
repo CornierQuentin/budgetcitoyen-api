@@ -204,6 +204,57 @@ async def upsert_recettes(db: AsyncSession, aggregats: Sequence[RecetteAggregat]
     logger.info("recettes upsertees: %d", len(values))
 
 
+async def get_remboursements_degrevements_cp(db: AsyncSession, annee: int) -> float:
+    """Retourne le total des CP de la mission "Remboursements et degrevements" (code RD).
+
+    Necessaire pour "regrossir" les recettes fiscales NETTES sourcees a la
+    Cour des comptes (2016-2023, cf. `api.etl.normalize.
+    normalize_recettes_cour_des_comptes`) et les rendre comparables, cote
+    calcul du deficit, aux depenses deja chargees par le pipeline
+    "depenses" existant (`upsert_depenses`).
+
+    Constat (verifie a l'execution reelle lors de l'ingestion des recettes
+    2016-2023): `upsert_depenses` somme TOUTES les missions du budget
+    general, y compris "Remboursements et degrevements" (code_mission
+    "RD") elle-meme - c'est donc une base BRUTE de depenses (~130-150 Md
+    EUR/an de plus que la base "nette" utilisee par le tableau d'equilibre
+    officiel, qui retranche justement ce montant des DEUX cotes: recettes
+    fiscales brutes -> nettes ET depenses brutes -> nettes, cf.
+    `api.etl.normalize._md_ou_m_vers_euros` et le "tableau d'equilibre"
+    Cour des comptes). Combiner des depenses BRUTES avec des recettes
+    fiscales NETTES (comme le fait `normalize_recettes_cour_des_comptes`
+    par construction: ses tableaux source disent explicitement "recettes
+    fiscales NETTES") SURESTIME donc le deficit calcule d'environ ce
+    montant - constate a l'execution reelle (ex: sans ce rattrapage, le
+    deficit LFI 2022 calcule ressort a ~284 Md EUR au lieu des ~154 Md EUR
+    officiels, verifies par ailleurs aupres du tableau d'equilibre Cour des
+    comptes 2022 lui-meme).
+
+    Le CP de la mission "RD" correspond, au M EUR pres, a la somme "R & D
+    sur impots d'Etat" + "R & D sur impots locaux" du tableau d'equilibre
+    Cour des comptes de la meme annee (ex 2020: 140830325376 EUR ici vs
+    140830325378 EUR cote Cour des comptes, LFI 2020) - preferee ici a une
+    nouvelle extraction Cour des comptes (qui ne serait de toute facon PAS
+    disponible pour 2023, cf. `api.etl.sources.
+    RECETTES_COUR_DES_COMPTES_FICHIER_EQUILIBRE`) car deja chargee et
+    fiable.
+
+    Retourne 0.0 si aucune depense n'est chargee pour cette mission/annee
+    (ex: 2016-2018, hors perimetre du pipeline "depenses" - `annee_budget`
+    ne sera de toute facon pas calcule pour ces annees, cf.
+    `recalculer_annee_budget`, qui exige depenses ET recettes).
+    """
+    total = await db.scalar(
+        select(func.coalesce(func.sum(Depense.cp), 0))
+        .select_from(Depense)
+        .join(Action, Depense.action_id == Action.id)
+        .join(Programme, Action.programme_id == Programme.id)
+        .join(Mission, Programme.mission_id == Mission.id)
+        .where(Mission.code_mission == "RD", Mission.annee == annee)
+    )
+    return float(total or 0.0)
+
+
 async def recalculer_annee_budget(
     db: AsyncSession,
     annee: int,

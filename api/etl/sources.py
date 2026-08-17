@@ -12,6 +12,12 @@ et le docstring de chaque normaliseur dans `api.etl.normalize`:
 Les recettes ("recettes du budget general") ne sont disponibles sous forme
 structuree que pour 2024 et 2025 sur ce portail (verifie par recherche
 exhaustive du catalogue complet - aucun dataset equivalent pour 2015-2023).
+Pour 2016-2020, 2022 et 2023, les recettes sont reconstituees a partir d'une
+source differente: les rapports annuels "Le budget de l'Etat en <annee>" de
+la Cour des comptes (voir RECETTES_COUR_DES_COMPTES_* ci-dessous et le
+docstring de `api.etl.normalize.normalize_recettes_cour_des_comptes`). 2015
+et 2021 restent des trous reels (aucune des deux sources ne fournit un
+tableau exploitable pour ces annees - voir ces memes constantes).
 """
 
 from api.core.config import get_settings
@@ -81,6 +87,115 @@ CODE_LIGNE_RECETTE_VERS_TYPE: dict[float, str] = {
     1601.0: "TVA",
     1501.0: "TICPE",
 }
+
+# --------------------------------------------------------------------------
+# Recettes 2016-2020/2022/2023: rapports annuels "Le budget de l'Etat en
+# <annee> (resultats et gestion)" de la Cour des comptes
+# (https://www.ccomptes.fr/fr/publications/le-budget-de-letat-en-<annee>
+# -resultats-et-gestion). Chaque rapport porte sur l'annee <annee> elle-meme
+# (pas de decalage: le rapport "2017" documente l'exercice 2017), et propose
+# un ZIP telechargeable contenant tous les tableaux/graphiques du rapport en
+# CSV.
+#
+# Deux tableaux distincts sont exploites par millesime, quand disponibles:
+# - un tableau "recettes fiscales nettes par impot" (IR/IS/TICPE/TVA/Autres),
+#   avec une colonne LFI (Loi de Finances Initiale votee) -> RECETTES_
+#   COUR_DES_COMPTES_FICHIER_IMPOT. C'est la seule donnee disponible pour
+#   TOUTES les annees couvertes.
+# - un tableau "tableau d'equilibre" (recettes fiscales nettes / recettes
+#   non fiscales / PSR UE / PSR collectivites / ...), egalement en colonne
+#   LFI -> RECETTES_COUR_DES_COMPTES_FICHIER_EQUILIBRE. Fournit les
+#   "recettes non fiscales" (ajoutees au bucket AUTRES, cf. normalize.py) et
+#   les PSR (exclus, meme methodologie que pour 2024-2025 - cf.
+#   `normalize.extract_prelevements_sur_recettes`). PAS disponible pour 2023
+#   (le ZIP 2023 ne contient que des fichiers de graphiques "G*.csv", aucun
+#   tableau "T*"/"D_Tableau*" avec une decomposition non-fiscale/PSR en LFI
+#   - verifie par recherche exhaustive du contenu du ZIP): pour 2023,
+#   `recette` ne couvre donc QUE les recettes fiscales nettes par impot,
+#   sans ajout des recettes non fiscales ni deduction des PSR - limitation
+#   connue et documentee, qui sous-estime legerement le deficit LFI 2023
+#   calcule par rapport aux autres annees de ce lot (cf. JOURNAL/PR).
+#
+# Noms de fichiers dans le ZIP VOLONTAIREMENT NON devinables par motif:
+# constate a l'inspection reelle des 7 ZIP (aout 2026), ils sont
+# incoherents d'un millesime a l'autre ("T14 recettes.csv" en 2015,
+# "D_T9 recettes fiscales nettes.csv" en 2016, "G16.csv" en 2022, "G 14.csv"
+# en 2023...). Les noms ci-dessous ont ete localises par recherche du
+# CONTENU (libelles "Impot sur le revenu"/"TVA"/"Impot sur les societes"/
+# "TICPE" + une colonne "LFI") au sein de chaque ZIP, jamais par le nom du
+# fichier lui-meme - voir le detail annee par annee dans le journal de la
+# PR qui a introduit ce bloc.
+#
+# 2015: le ZIP ("RBDE-2015.zip") ne contient AUCUN tableau consolide par
+# impot avec une colonne LFI absolue - seuls des tableaux d'"ecart"
+# (variations relatives annee sur annee, ex "Ecart LFI: +1,9 Md ... -0,8
+# Md") et un tableau agrege "Recettes fiscales nettes" (sans decomposition
+# par impot) sont presents. Reconstruire un montant absolu par impot a
+# partir de ces seuls ecarts serait fragile (risque d'erreur de composition
+# non detectable) - annee volontairement exclue plutot que forcee.
+#
+# 2021: le rapport ne propose PAS de ZIP de donnees consolidees (verifie a
+# l'execution reelle: la page /fr/publications/le-budget-de-letat-en-2021
+# -resultats-et-gestion ne contient aucun lien vers un fichier .zip). Les
+# seules ressources telechargeables sont des PDF individuels par
+# mission/theme (notes d'execution budgetaire, format "NEB"), dont un PDF
+# "Recettes fiscales 2021" (NEB-2021-Recettes-fiscales.pdf) - PAS un CSV
+# structure exploitable automatiquement. Annee exclue.
+RECETTES_COUR_DES_COMPTES_ZIP_URLS: dict[int, str] = {
+    2016: "https://www.ccomptes.fr/sites/default/files/EzPublish/Donnees-RBDE-2016.zip",
+    2017: "https://www.ccomptes.fr/sites/default/files/2018-05/20180523-donnees-rapport-budget-Etat-2017.zip",
+    2018: "https://www.ccomptes.fr/sites/default/files/2023-10/20190515-donnees-Budget-Etat-2018_0.zip",
+    2019: "https://www.ccomptes.fr/sites/default/files/2023-10/20200428-donnees-RBDE_2019.zip",
+    2020: "https://www.ccomptes.fr/sites/default/files/2021-10/20210413-donnees-Budget-Etat-2020.zip",
+    2022: "https://www.ccomptes.fr/sites/default/files/2023-10/20230413-donnees-RBDE-2022.zip",
+    2023: "https://www.ccomptes.fr/sites/default/files/2024-08/20240417-donnees-RBDE-2023.zip",
+}
+
+# Membre du ZIP portant le tableau "recettes fiscales nettes par impot".
+RECETTES_COUR_DES_COMPTES_FICHIER_IMPOT: dict[int, str] = {
+    2016: "Données/D_T9 recettes fiscales nettes.csv",
+    2017: "Data/DATAFIJ/D_T12- Recettes fiscales nettes.csv",
+    2018: (
+        "Sources OPEN DATA-Tableaux et graphiques-version 13 mai matin/"
+        "D_T5 - recettes fiscales nettes.csv"
+    ),
+    2019: "RBDE 2019 - Tableaux et graphiques - 28 avril 2020/D_T4 - recettes fiscales.csv",
+    2020: "D_Graphique 3.csv",
+    2022: "G16.csv",
+    2023: "G 14.csv",
+}
+
+# Membre du ZIP portant le "tableau d'equilibre" (recettes non fiscales +
+# PSR, colonne LFI). Absent de ce dict pour 2023 (cf. commentaire ci-dessus).
+RECETTES_COUR_DES_COMPTES_FICHIER_EQUILIBRE: dict[int, str] = {
+    2016: "Données/D_T1- formation du solde.csv",
+    2017: "Data/DATAFIJ/D_T3 - Recettes nettes Etat.csv",
+    2018: (
+        "Sources OPEN DATA-Tableaux et graphiques-version 13 mai matin/"
+        "D_T4 - Recettes nettes de l'Etat.csv"
+    ),
+    2019: "RBDE 2019 - Tableaux et graphiques - 28 avril 2020/D_T8 - recettes du BG.csv",
+    2020: "D_Tableau n°1.csv",
+    2022: "T1.csv",
+}
+
+# Delimiteur CSV par millesime: ";" pour 2016-2020 (export d'origine
+# Cour des comptes), "," a partir de 2022 (constate a l'inspection reelle -
+# pas une regle generale du site, juste l'export tel quel observe par
+# annee). Le point (pas la virgule) est le separateur decimal dans TOUS les
+# fichiers retenus ici, y compris ceux delimites par ";" - `clean_montant`
+# gere les deux de toute facon.
+RECETTES_COUR_DES_COMPTES_DELIMITER: dict[int, str] = {
+    2016: ";",
+    2017: ";",
+    2018: ";",
+    2019: ";",
+    2020: ";",
+    2022: ",",
+    2023: ",",
+}
+
+RECETTES_COUR_DES_COMPTES_ANNEES: tuple[int, ...] = (2016, 2017, 2018, 2019, 2020, 2022, 2023)
 
 
 def records_url(dataset_id: str) -> str:
