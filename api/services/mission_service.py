@@ -1,9 +1,11 @@
 """Logique metier liee aux missions, programmes et actions budgetaires."""
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.core.errors import ProblemDetailException
+from api.models.action import Action
+from api.models.depense import Depense
 from api.models.mission import Mission
 from api.models.programme import Programme
 
@@ -61,3 +63,27 @@ async def obtenir_programme(db: AsyncSession, programme_id: int, annee: int | No
             detail=f"Aucun programme trouve pour l'id {programme_id}.",
         )
     return programme
+
+
+async def totaux_depenses_par_mission(db: AsyncSession, annee: int) -> dict[str, tuple[str, float]]:
+    """Retourne le total des credits de paiement (CP) par mission pour une annee.
+
+    Cle = slug de la mission (stable dans le temps, cf. `api.etl.normalize`),
+    valeur = (nom_officiel, montant total CP). Fonction partagee: reutilisee
+    par le comparateur d'annees et, a terme, par le module de budget
+    personnalise (repartition de la contribution individuelle par mission).
+    """
+    stmt = (
+        select(
+            Mission.slug,
+            Mission.nom_officiel,
+            func.coalesce(func.sum(Depense.cp), 0.0),
+        )
+        .join(Programme, Programme.mission_id == Mission.id)
+        .join(Action, Action.programme_id == Programme.id)
+        .join(Depense, Depense.action_id == Action.id)
+        .where(Mission.annee == annee)
+        .group_by(Mission.slug, Mission.nom_officiel)
+    )
+    result = await db.execute(stmt)
+    return {slug: (nom, float(total)) for slug, nom, total in result.all()}

@@ -40,6 +40,21 @@ async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
 
 
 @pytest_asyncio.fixture
+async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
+    """Session SQLAlchemy sur la meme base de test que `async_client` (meme engine).
+
+    Permet de seeder des donnees (Mission/Programme/Action/Depense/Recette/...)
+    avant d'appeler l'API via `async_client`: les deux fixtures partagent le
+    meme `db_engine` (donc la meme base Postgres de test), seul le
+    `async_sessionmaker` est recree ici. Les tests doivent `commit()`
+    explicitement apres insertion.
+    """
+    session_maker = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with session_maker() as session:
+        yield session
+
+
+@pytest_asyncio.fixture
 async def async_client(db_engine: AsyncEngine) -> AsyncGenerator[AsyncClient, None]:
     """Client HTTP asynchrone branche sur l'application, avec la DB de test injectee."""
     session_maker = async_sessionmaker(db_engine, expire_on_commit=False)
