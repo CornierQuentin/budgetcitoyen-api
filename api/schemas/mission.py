@@ -31,6 +31,9 @@ class MissionResponse(BaseModel):
     nom_normalise: str
     nom_officiel: str
     annee: int
+    # Somme des credits de paiement (Depense.cp) de la mission pour son annee.
+    # Necessaire pour le treemap des depenses par mission (CDC Module 1).
+    montant_total: float
 
 
 class MissionHistoriqueItem(BaseModel):
@@ -38,3 +41,28 @@ class MissionHistoriqueItem(BaseModel):
 
     annee: int
     nom_officiel: str
+
+
+class ActionDetailItem(BaseModel):
+    id: int
+    code: str
+    nom: str
+    ae: float
+    cp: float
+
+
+class ProgrammeDetailItem(BaseModel):
+    id: int
+    code: str
+    nom: str
+    montant_total: float  # somme des cp de ses actions
+    actions: list[ActionDetailItem]
+
+
+class MissionDetailResponse(BaseModel):
+    id: int
+    slug: str
+    nom_officiel: str
+    annee: int
+    montant_total: float
+    programmes: list[ProgrammeDetailItem]
