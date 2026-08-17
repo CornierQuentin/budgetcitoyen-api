@@ -1,18 +1,19 @@
 """CLI d'orchestration du pipeline ETL: telechargement -> normalisation -> chargement.
 
 Usage:
-    python -m api.etl.run [--annees 2016-2025]
+    python -m api.etl.run [--annees 2012-2025]
         [--depenses-only | --recettes-only | --indicateurs-only]
 
-Ingere les depenses de l'Etat (budget general) pour 2016-2025, les recettes
-du budget general pour 2016-2020/2022-2025 (deux sources cohabitent: le
-portail data.economie.gouv.fr pour 2024-2025, et les rapports annuels "Le
-budget de l'Etat en <annee>" de la Cour des comptes pour 2016-2020 et
-2022-2023 - voir `_charger_recettes` et `_charger_recettes_cour_des_comptes`
-respectivement), et les indicateurs macro (PIB nominal, population - voir
-`_charger_indicateurs`). 2015 et 2021 restent des trous reels (aucune des
-deux sources ne fournit de tableau exploitable pour ces annees - voir
-`api.etl.sources.RECETTES_COUR_DES_COMPTES_ZIP_URLS`).
+Ingere les depenses de l'Etat (budget general) pour 2012-2014 et 2016-2025,
+les recettes du budget general pour 2016-2020/2022-2025 (deux sources
+cohabitent: le portail data.economie.gouv.fr pour 2024-2025, et les rapports
+annuels "Le budget de l'Etat en <annee>" de la Cour des comptes pour
+2016-2020 et 2022-2023 - voir `_charger_recettes` et
+`_charger_recettes_cour_des_comptes` respectivement), et les indicateurs
+macro (PIB nominal, population - voir `_charger_indicateurs`). 2015 (cote
+depenses) et 2021 (cote recettes) restent des trous reels, hors perimetre de
+cette passe d'ingestion (voir `api.etl.sources.
+RECETTES_COUR_DES_COMPTES_ZIP_URLS` pour le detail de 2021).
 """
 
 from __future__ import annotations
@@ -125,6 +126,32 @@ async def _fetch_depenses_annee(
         raw = await _fetch_all_records(client, dataset_id)
         records = normalize.normalize_depenses_records_json(raw, annee)
         source_url = sources.records_url(dataset_id)
+    elif annee == 2012:
+        ids = sources.DEPENSES_DATASETS_2012_2014[2012]
+        montants = await _fetch_all_records(client, ids["montants"])
+        nomenclature_mission_programme = await _fetch_all_records(
+            client, ids["nomenclature_mission_programme"]
+        )
+        nomenclature_destination = await _fetch_all_records(client, ids["nomenclature_destination"])
+        records = normalize.normalize_depenses_2012(
+            montants, nomenclature_mission_programme, nomenclature_destination, annee
+        )
+        source_url = sources.records_url(ids["montants"])
+    elif annee == 2013:
+        ids = sources.DEPENSES_DATASETS_2012_2014[2013]
+        montants = await _fetch_all_records(client, ids["montants"])
+        nomenclature_programme = await _fetch_all_records(client, ids["nomenclature_programme"])
+        nomenclature_destination = await _fetch_all_records(client, ids["nomenclature_destination"])
+        records = normalize.normalize_depenses_2013(
+            montants, nomenclature_programme, nomenclature_destination, annee
+        )
+        source_url = sources.records_url(ids["montants"])
+    elif annee == 2014:
+        ids = sources.DEPENSES_DATASETS_2012_2014[2014]
+        montants = await _fetch_all_records(client, ids["montants"])
+        nomenclature_destination = await _fetch_all_records(client, ids["nomenclature_destination"])
+        records = normalize.normalize_depenses_2014(montants, nomenclature_destination, annee)
+        source_url = sources.records_url(ids["montants"])
     elif annee == 2016:
         dataset_id = sources.DEPENSES_DATASETS_ATTACHMENTS[2016]
         attachment_id = sources.DEPENSES_ATTACHMENT_IDS[2016]["detaillee"]
@@ -472,8 +499,8 @@ async def run_etl(
     ]
     for a in hors_perimetre:
         logger.warning(
-            "annee %d hors perimetre de cette passe d'ingestion (depenses: 2016-2025, "
-            "recettes: 2016-2020/2022-2025), ignoree",
+            "annee %d hors perimetre de cette passe d'ingestion (depenses: 2012-2014/"
+            "2016-2025, recettes: 2016-2020/2022-2025), ignoree",
             a,
         )
 
@@ -563,8 +590,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--annees",
-        default="2016-2025",
-        help="Plage/liste d'annees (ex: '2016-2025', '2024,2025'). Defaut: 2016-2025.",
+        default="2012-2025",
+        help="Plage/liste d'annees (ex: '2012-2025', '2024,2025'). Defaut: 2012-2025.",
     )
     groupe = parser.add_mutually_exclusive_group()
     groupe.add_argument("--depenses-only", action="store_true", help="Ne charger que les depenses.")

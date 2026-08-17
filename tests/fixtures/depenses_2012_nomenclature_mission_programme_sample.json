@@ -1,0 +1,29 @@
+{
+    "total_count": 3,
+    "results": [
+        {
+            "annee": "2012",
+            "code_de_programme": "146",
+            "programme": "Équipement des forces",
+            "code_de_mission": "DA",
+            "mission": "Défense",
+            "type_de_budget": "Budget général"
+        },
+        {
+            "annee": "2012",
+            "code_de_programme": "231",
+            "programme": "Vie étudiante",
+            "code_de_mission": "RA",
+            "mission": "Recherche et enseignement supérieur",
+            "type_de_budget": "Budget général"
+        },
+        {
+            "annee": "2012",
+            "code_de_programme": "741",
+            "programme": "Pensions civiles et militaires de retraite et allocations temporaires d'invalidité",
+            "code_de_mission": "YD",
+            "mission": "Pensions",
+            "type_de_budget": "Comptes d'affectation spéciale"
+        }
+    ]
+}

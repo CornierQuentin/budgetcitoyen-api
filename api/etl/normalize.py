@@ -13,15 +13,18 @@ Resolution d'identite des missions
 Le libelle d'une mission peut changer d'une annee sur l'autre (ex: fusion,
 renommage de ministere) alors que la mission logique reste la meme. La cle de
 rapprochement prioritaire est `code_mission` (code LOLF a 2 lettres, stable
-dans le temps sur tout notre perimetre 2018-2025). A defaut de code (2016 et
-2017, cf. `normalize_depenses_2016`/`normalize_depenses_2017`: ces
-millesimes n'exposent qu'un libelle mission texte, pas de code), on retombe
-sur le slug du libelle courant comme cle de secours - chaque variante sans
-code forme alors sa propre mission logique. Le slug etant calcule a partir
-du TEXTE du libelle (independamment de la presence d'un code), il reste
-neanmoins souvent identique a celui deja retenu pour 2018+ (meme cle
-naturelle de rapprochement) tant que l'intitule de la mission n'a pas change
-d'un millesime a l'autre.
+dans le temps sur tout notre perimetre 2018-2025, et egalement disponible
+pour 2012 - cf. `normalize_depenses_2012` - via une nomenclature dediee). A
+defaut de code (2013 et 2014, cf. `normalize_depenses_2013`/
+`normalize_depenses_2014`: aucune source disponible n'expose de code mission
+pour ces deux millesimes; 2016 et 2017, cf. `normalize_depenses_2016`/
+`normalize_depenses_2017`: ces millesimes n'exposent qu'un libelle mission
+texte, pas de code), on retombe sur le slug du libelle courant comme cle de
+secours - chaque variante sans code forme alors sa propre mission logique.
+Le slug etant calcule a partir du TEXTE du libelle (independamment de la
+presence d'un code), il reste neanmoins souvent identique a celui deja
+retenu pour les autres annees (meme cle naturelle de rapprochement) tant que
+l'intitule de la mission n'a pas change d'un millesime a l'autre.
 
 Le "libelle canonique" d'une mission logique (utilise pour `nom_normalise`
 et pour calculer son `slug`) est celui de l'annee la plus recente ou elle a
@@ -329,6 +332,279 @@ def _format_code(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value).strip()
+
+
+def _build_action_libelle_par_destination(
+    nomenclature_destination: list[dict[str, Any]],
+) -> dict[tuple[str, str], str]:
+    """Construit un mapping (code programme, code action 2 chiffres) -> libelle action.
+
+    Utilise par `normalize_depenses_2012`/`normalize_depenses_2013`: dans ces
+    deux millesimes, le dataset "nomenclature par destination" (`mission`,
+    `programme`, `action`, `libelle_action`, ...) porte plusieurs lignes par
+    action distincte (une par sous-action, cf. colonne `s_action`/
+    `sous_action`) qui partagent toutes le meme `libelle_action` - verifie
+    exhaustivement a l'execution reelle sur les deux millesimes (aucun
+    contre-exemple): on ne garde donc que la PREMIERE ligne rencontree pour
+    chaque cle. `action` arrive en JSON comme entier (ex: 8) alors que le
+    dataset de montants l'exprime en chaine 2 chiffres ("08"): normalise ici
+    via `_format_code` puis `zfill(2)` pour que la cle matche.
+
+    Ce dataset n'est PAS filtre par perimetre budgetaire (il melange BG/CAS/
+    CCF, contrairement au dataset de montants qui lui est BG pur): verifie a
+    l'execution reelle qu'aucune paire (programme, action) n'y est partagee
+    entre deux missions de perimetres differents - la jointure par
+    (programme, action) seul, sans le libelle mission, est donc sans
+    ambiguite malgre l'absence de filtre BG explicite ici.
+    """
+    out: dict[tuple[str, str], str] = {}
+    for row in nomenclature_destination:
+        programme_code = _format_code(row["programme"])
+        action_raw = row.get("action")
+        if action_raw is None:
+            continue
+        action_code = _format_code(action_raw).zfill(2)
+        out.setdefault((programme_code, action_code), row["libelle_action"])
+    return out
+
+
+def normalize_depenses_2012(
+    montants: list[dict[str, Any]],
+    nomenclature_mission_programme: list[dict[str, Any]],
+    nomenclature_destination: list[dict[str, Any]],
+    annee: int = 2012,
+) -> list[DepenseRecord]:
+    """Normalise le format 2012: dataset "dotation BG" (montants) + 2 nomenclatures a joindre.
+
+    Source des montants: `lfi-2012-dotation-bg-en-ae-cp-par-mission-
+    programme-action-et-categorie` (API records JSON, PAS une piece jointe
+    CSV comme 2016-2018/2020-2022). Deja filtre au budget general par
+    CONSTRUCTION (pas de colonne perimetre a filtrer ici): verifie a
+    l'execution reelle - ses 32 missions distinctes sont exactement les
+    missions BG connues, aucune mission CAS/CCF (ex "Pensions", "Avances...")
+    n'y apparait. Chaque ligne expose un libelle mission en texte brut (PAS
+    de code), un CODE programme et un CODE action bruts (SANS libelle
+    programme ni libelle action), et le detail par `categorie` (comme
+    `normalize_depenses_2016`/`2017`: plusieurs lignes categorie par action,
+    sommees par `aggregate_depenses`). Colonne montant retenue: `aelf`/
+    `cplf` (LFI VOTEE finale, derniere colonne de chaque bloc - PAS `aelf_
+    2011`/`cplf_2011` (LFI annee precedente), `aeplf` (avant-projet) ni
+    `aeamt` (amendements seuls, deja inclus dans `aelf`/`cplf`)).
+
+    Deux jointures completent les libelles/codes manquants:
+
+    1. `nomenclature_mission_programme` (`lfi-2012-nomenclature-mission-
+       programme`): mapping (code programme) -> (code mission LOLF 2
+       lettres, libelle programme), apres filtrage sur `type_de_budget ==
+       "Budget général"` (ce dataset melange BG/CAS/CCF, la colonne permet
+       d'isoler le perimetre voulu - verifie a l'execution reelle qu'aucun
+       code programme n'est partage entre deux perimetres differents sur ce
+       millesime, la restriction BG est donc sans ambiguite malgre son
+       absence de la cle de jointure elle-meme). Fournit `code_mission`,
+       CONTRAIREMENT a 2013/2014 (`normalize_depenses_2013`/
+       `normalize_depenses_2014`) dont aucune source disponible n'expose de
+       code mission LOLF: 2012 est donc la seule des 3 annees ou la
+       resolution d'identite de mission (`resolve_mission_identities`) peut
+       s'appuyer sur un code plutot que sur le repli slug.
+    2. `nomenclature_destination` (`plf-2012-nomenclature-par-destination`,
+       via `_build_action_libelle_par_destination`): mapping (code
+       programme, code action) -> libelle action.
+
+    Taux de correspondance constate a l'execution reelle (aout 2026, sur les
+    2076 lignes de montants): 2076/2076 (100%) trouvent leur (code_mission,
+    libelle programme) via la nomenclature mission-programme; 2014/2076
+    (97%, 62 lignes orphelines sur 19 paires (programme, action) distinctes
+    - concentrees sur les programmes 137/149/166/169/180/216/308/309)
+    trouvent un libelle d'action via la nomenclature destination. Les lignes
+    orphelines d'un cote ou de l'autre replient sur le CODE brut comme
+    libelle (comme le repli deja utilise par `normalize_depenses_2016` pour
+    `programme_libelle` en l'absence totale de nomenclature programme): le
+    MONTANT de ces lignes n'est pas affecte, seul l'affichage du libelle en
+    est degrade - juge acceptable au vu du taux de correspondance tres
+    majoritaire.
+    """
+    prog_info: dict[str, tuple[str, str]] = {}
+    for row in nomenclature_mission_programme:
+        if row.get("type_de_budget") != "Budget général":
+            continue
+        prog_info[row["code_de_programme"]] = (row["code_de_mission"], row["programme"])
+
+    action_libelle = _build_action_libelle_par_destination(nomenclature_destination)
+
+    out: list[DepenseRecord] = []
+    for row in montants:
+        programme_code = _format_code(row["programme"])
+        action_code = _format_code(row["action"]).zfill(2)
+        mission_code, programme_libelle = prog_info.get(programme_code, ("", programme_code))
+        out.append(
+            DepenseRecord(
+                annee=annee,
+                mission_code=mission_code,
+                mission_libelle=row["mission"],
+                programme_code=programme_code,
+                programme_libelle=programme_libelle,
+                action_code=f"{programme_code}-{action_code}",
+                action_libelle=action_libelle.get((programme_code, action_code), action_code),
+                ae=clean_montant(row.get("aelf")),
+                cp=clean_montant(row.get("cplf")),
+            )
+        )
+    return out
+
+
+def normalize_depenses_2013(
+    montants: list[dict[str, Any]],
+    nomenclature_programme: list[dict[str, Any]],
+    nomenclature_destination: list[dict[str, Any]],
+    annee: int = 2013,
+) -> list[DepenseRecord]:
+    """Normalise le format 2013: meme famille que 2012, sans code mission disponible.
+
+    Source des montants: `lfi-2013-dotation-bg-en-ae-cp-par-mission-
+    programme-action-et-categorie` (API records JSON), structure identique a
+    2012 (`normalize_depenses_2012`): libelle mission en texte brut, codes
+    programme/action bruts, decomposition par `categorie` sommee par
+    `aggregate_depenses`, colonnes montant `aelf`/`cplf` (LFI votee finale).
+
+    A la difference de 2012, AUCUN dataset "nomenclature-mission-programme"
+    equivalent n'existe pour 2013 sur ce portail (verifie par recherche
+    exhaustive du catalogue complet, aout 2026: aucun dataset dont l'id ou le
+    titre associe "2013" et "nomenclature"+"mission"+"programme"): pas de
+    code mission LOLF disponible pour ce millesime, `mission_code` reste
+    donc systematiquement vide (comme `normalize_depenses_2016`/`2017`) -
+    resolution d'identite de mission repliee sur le slug du libelle (cf.
+    docstring du module).
+
+    Deux nomenclatures BG-dediees comblent les libelles manquants:
+
+    1. `nomenclature_programme` (`plf-2013-budget-general-par-mission`,
+       malgre son nom trompeur - inspection reelle du contenu confirme qu'il
+       s'agit d'un mapping PAR PROGRAMME: 125 lignes pour 125 programmes,
+       champs `programme` (code) + `libelle` (libelle du programme, PAS de
+       la mission)): mapping (code programme) -> libelle programme. 100% des
+       125 codes programme du dataset de montants s'y retrouvent (verifie a
+       l'execution reelle).
+    2. `nomenclature_destination` (`plf-2013-budget-general-nomenclature-
+       par-destination`, via `_build_action_libelle_par_destination`):
+       mapping (code programme, code action) -> libelle action.
+
+    Taux de correspondance constate a l'execution reelle (aout 2026, sur les
+    2147 lignes de montants): 2147/2147 (100%) trouvent leur libelle
+    programme; 2027/2147 (94%, 120 lignes orphelines sur 30 paires
+    (programme, action) distinctes - concentrees sur les programmes
+    124/144/164/212/224, dont le dataset de montants LFI expose davantage
+    d'actions que la nomenclature PLF de destination) trouvent un libelle
+    d'action. Meme repli sur le code brut que `normalize_depenses_2012` pour
+    les lignes orphelines (montant non affecte, seul le libelle l'est).
+    """
+    prog_libelle: dict[str, str] = {
+        _format_code(row["programme"]): row["libelle"] for row in nomenclature_programme
+    }
+    action_libelle = _build_action_libelle_par_destination(nomenclature_destination)
+
+    out: list[DepenseRecord] = []
+    for row in montants:
+        programme_code = _format_code(row["programme"])
+        action_code = _format_code(row["action"]).zfill(2)
+        out.append(
+            DepenseRecord(
+                annee=annee,
+                mission_code="",
+                mission_libelle=row["mission"],
+                programme_code=programme_code,
+                programme_libelle=prog_libelle.get(programme_code, programme_code),
+                action_code=f"{programme_code}-{action_code}",
+                action_libelle=action_libelle.get((programme_code, action_code), action_code),
+                ae=clean_montant(row.get("aelf")),
+                cp=clean_montant(row.get("cplf")),
+            )
+        )
+    return out
+
+
+def normalize_depenses_2014(
+    montants: list[dict[str, Any]],
+    nomenclature_destination: list[dict[str, Any]],
+    annee: int = 2014,
+) -> list[DepenseRecord]:
+    """Normalise le format 2014: dataset "dotation BG" + 1 seule nomenclature BG-filtree.
+
+    Source des montants: `lfi-2014-dotation-bg-en-ae-cp-par-action-
+    categorie` (API records JSON, ~2046 lignes). Deja BG par construction
+    (pas de colonne perimetre a filtrer), avec `mission`/`programme`/
+    `action` DEJA presents en clair sur chaque ligne (contrairement a 2012/
+    2013: seuls les LIBELLES programme/action manquent encore, pas les
+    codes). Decomposition par `categorie` (int), sommee par
+    `aggregate_depenses` comme les autres millesimes.
+
+    Piege de qualite de donnees VERIFIE a l'execution reelle (aout 2026): les
+    colonnes CP (`cplf_2013`, `cpplf`, `cpamt`, `cplf`) sont typees TEXTE
+    avec un separateur de milliers en ESPACE ASCII normal (0x20) integre a
+    la chaine (ex: `"1 112 702"`), alors que les colonnes AE equivalentes
+    (`aelf_2013`, `aeplf`, `aeamt`, `aelf`) sont des entiers JSON propres.
+    `clean_montant` gere DEJA ce cas SANS modification necessaire: son
+    tuple `_THOUSANDS_SEPARATORS` inclut l'espace ASCII normal (`" "`, le
+    tout premier element) en plus des espaces insecables - confirme par test
+    direct sur ce millesime (`clean_montant("1 112 702") == 1112702.0`).
+    Aucune extension du nettoyage numerique n'a donc ete necessaire, malgre
+    l'hypothese initiale. Le dataset porte aussi des colonnes fantomes
+    `column_14` a `column_22`, TOUJOURS nulles (verifie exhaustivement sur
+    les 2046 lignes): ignorees ici, jamais lues.
+
+    Libelles programme ET action: `nomenclature_destination` (`li-2014-
+    nomenclature-par-destination` - id source avec une VRAIE typo ("li-2014"
+    et non "lfi-2014"), volontairement PAS "corrigee" ici, l'id exact
+    existant reellement dans le catalogue ayant ete verifie par requete
+    directe), apres filtrage sur `type_de_mission == "Budget général"` (ce
+    dataset melange BG/CAS/CCF; contrairement a 2012/2013, la colonne
+    perimetre EST presente sur ce dataset de nomenclature - filtrage direct,
+    sans avoir besoin de verifier l'absence de collision de code). Fournit
+    en une seule jointure, par (code_programme, code_action), a la fois le
+    libelle programme (`programme`) et le libelle action (`action` - le nom
+    de colonne de ce dataset, malgre son nom, porte le LIBELLE, pas le code:
+    le code est dans `code_action`).
+
+    AUCUN code mission LOLF disponible pour ce millesime (ce dataset expose
+    `type_de_mission`, un texte de PERIMETRE budgetaire BG/CAS/CCF, PAS un
+    code mission a 2 lettres): `mission_code` reste vide comme 2013, meme
+    repli sur le slug pour la resolution d'identite (cf. docstring du
+    module).
+
+    Taux de correspondance constate a l'execution reelle (aout 2026, sur les
+    2046 lignes de montants): 2036/2046 (99.5%, 10 lignes orphelines sur 4
+    paires (programme, action) distinctes) trouvent leur libelle programme
+    et action simultanement via cette unique jointure. Meme repli sur le
+    code brut que 2012/2013 pour les lignes orphelines (montant non
+    affecte).
+    """
+    prog_action_libelle: dict[tuple[str, str], tuple[str, str]] = {}
+    for row in nomenclature_destination:
+        if row.get("type_de_mission") != "Budget général":
+            continue
+        key = (_format_code(row["code_programme"]), _format_code(row["code_action"]).zfill(2))
+        prog_action_libelle.setdefault(key, (row["programme"], row["action"]))
+
+    out: list[DepenseRecord] = []
+    for row in montants:
+        programme_code = _format_code(row["programme"])
+        action_code = _format_code(row["action"]).zfill(2)
+        programme_libelle, action_libelle = prog_action_libelle.get(
+            (programme_code, action_code), (programme_code, action_code)
+        )
+        out.append(
+            DepenseRecord(
+                annee=annee,
+                mission_code="",
+                mission_libelle=row["mission"],
+                programme_code=programme_code,
+                programme_libelle=programme_libelle,
+                action_code=f"{programme_code}-{action_code}",
+                action_libelle=action_libelle,
+                ae=clean_montant(row.get("aelf")),
+                cp=clean_montant(row.get("cplf")),
+            )
+        )
+    return out
 
 
 def normalize_depenses_records_json(

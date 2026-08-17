@@ -1,0 +1,29 @@
+{
+    "total_count": 3,
+    "results": [
+        {
+            "mission": "Gestion des finances publiques et des ressources humaines",
+            "programme": 156,
+            "action": "9",
+            "libelle_action": "Soutien",
+            "sous_action": 1,
+            "libelle_ssa": "Soutien COPERNIC"
+        },
+        {
+            "mission": "Gestion des finances publiques et des ressources humaines",
+            "programme": 156,
+            "action": "9",
+            "libelle_action": "Soutien",
+            "sous_action": 2,
+            "libelle_ssa": "Soutien autre que COPERNIC"
+        },
+        {
+            "mission": "Sécurité",
+            "programme": 176,
+            "action": "1",
+            "libelle_action": "Ordre public et protection de la souveraineté",
+            "sous_action": null,
+            "libelle_ssa": "Ordre public"
+        }
+    ]
+}

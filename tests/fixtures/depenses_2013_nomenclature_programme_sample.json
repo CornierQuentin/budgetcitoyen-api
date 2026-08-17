@@ -1,0 +1,27 @@
+{
+    "total_count": 2,
+    "results": [
+        {
+            "mission": "Gestion des finances publiques et des ressources humaines",
+            "programme": "156",
+            "libelle": "Gestion fiscale et financière de l'État et du secteur public local",
+            "ae_titre_2": 7267997938,
+            "ae_autres_titres": 1286003617,
+            "total_ae": 8554001555,
+            "cp_titre_2": 7267997938,
+            "cp_autres_titres": 1249394066,
+            "total_cp": 8517392004
+        },
+        {
+            "mission": "Sécurité",
+            "programme": "176",
+            "libelle": "Police nationale",
+            "ae_titre_2": 8586221052,
+            "ae_autres_titres": 980413616,
+            "total_ae": 9566634668,
+            "cp_titre_2": 8586221052,
+            "cp_autres_titres": 889917878,
+            "total_cp": 9476138930
+        }
+    ]
+}
