@@ -13,6 +13,7 @@ plutot que de tenter un upsert ligne a ligne sans cle stable.
 
 import logging
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -23,6 +24,7 @@ from api.models.action import Action
 from api.models.annee_budget import AnneeBudget
 from api.models.depense import Depense
 from api.models.indicateur_macro import IndicateurMacro
+from api.models.ingestion_log import IngestionLog
 from api.models.mission import Mission
 from api.models.mission_alias import MissionAlias
 from api.models.programme import Programme
@@ -418,3 +420,8 @@ async def upsert_indicateurs_macro(
     )
     await db.execute(stmt)
     logger.info("indicateurs_macro upsertes: %d", len(values))
+
+
+async def enregistrer_ingestion_terminee(db: AsyncSession) -> None:
+    """Trace la fin d'une execution ETL reussie, pour `derniere_ingestion` (GET /health)."""
+    await db.execute(insert(IngestionLog).values(termine_a=datetime.now(UTC)))
