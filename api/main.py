@@ -15,6 +15,7 @@ from api.core.errors import (
     unhandled_exception_handler,
 )
 from api.core.rate_limit import limiter
+from api.core.security_headers import SecurityHeadersMiddleware
 from api.routers import (
     budget,
     budget_perso,
@@ -39,6 +40,7 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
     app.add_middleware(SlowAPIMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
 
     app.add_middleware(
         CORSMiddleware,

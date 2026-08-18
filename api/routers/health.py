@@ -4,6 +4,10 @@ from importlib.metadata import PackageNotFoundError, version
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+from sqlalchemy import select
+
+from api.db.deps import DbSession
+from api.models.ingestion_log import IngestionLog
 
 router = APIRouter(tags=["health"])
 
@@ -22,5 +26,10 @@ def _get_version() -> str:
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health() -> HealthResponse:
-    return HealthResponse(status="ok", version=_get_version(), derniere_ingestion=None)
+async def health(db: DbSession) -> HealthResponse:
+    derniere = await db.scalar(select(IngestionLog.termine_a).order_by(IngestionLog.id.desc()))
+    return HealthResponse(
+        status="ok",
+        version=_get_version(),
+        derniere_ingestion=derniere.isoformat() if derniere else None,
+    )

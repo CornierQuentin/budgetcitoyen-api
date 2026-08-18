@@ -26,9 +26,11 @@ from io import BytesIO
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from api.db.session import engine as _prod_engine
 from api.etl import loader, normalize, run, sources
 from api.models.indicateur_macro import IndicateurMacro
 from api.models.mission import Mission
@@ -37,6 +39,20 @@ from api.models.recette import Recette, TypeRecette
 
 async def _no_sleep(*_args: object, **_kwargs: object) -> None:
     return None
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _dispose_moteur_production_apres_chaque_test():
+    """`run_etl` utilise le moteur SQLAlchemy applicatif (`api.db.session.engine`,
+    global, cree une seule fois a l'import), pas la fixture `db_engine`
+    (NullPool dedie par test, cf. conftest.py). Sans ce nettoyage, son pool par
+    defaut peut reutiliser une connexion asyncpg liee a la boucle d'evenements
+    d'un test precedent - deja fermee par pytest-asyncio (une boucle par test) -
+    provoquant une erreur "another operation is in progress" sur un test
+    suivant. Dispose le pool apres chaque test pour forcer une connexion fraiche
+    liee a la boucle du test suivant."""
+    yield
+    await _prod_engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -548,8 +564,13 @@ def _patch_chargeurs(monkeypatch: pytest.MonkeyPatch, appels: list[str]) -> None
 
 
 async def test_run_etl_appelle_toutes_les_etapes_demandees(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, db_engine: AsyncEngine
 ) -> None:
+    # `db_engine` non utilise directement : `run_etl` appelle desormais reellement
+    # `loader.enregistrer_ingestion_terminee` (via le moteur applicatif global, pas
+    # ce fixture) juste avant son commit - la fixture cree la table `ingestion_log`
+    # (comme le reste du schema) au moment ou ce test en a besoin, et la nettoie
+    # ensuite (cf. sa docstring dans conftest.py).
     appels: list[str] = []
     _patch_chargeurs(monkeypatch, appels)
     recalculs: list[int] = []
@@ -572,8 +593,9 @@ async def test_run_etl_appelle_toutes_les_etapes_demandees(
 
 
 async def test_run_etl_route_les_recettes_cour_des_comptes(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, db_engine: AsyncEngine
 ) -> None:
+    # `db_engine` : voir le commentaire de test_run_etl_appelle_toutes_les_etapes_demandees.
     appels: list[str] = []
     _patch_chargeurs(monkeypatch, appels)
     monkeypatch.setattr(run.loader, "recalculer_annee_budget", lambda *a, **k: _none_coro())
@@ -589,8 +611,9 @@ async def test_run_etl_route_les_recettes_cour_des_comptes(
 
 
 async def test_run_etl_indicateurs_only_ne_touche_pas_annee_budget(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, db_engine: AsyncEngine
 ) -> None:
+    # `db_engine` : voir le commentaire de test_run_etl_appelle_toutes_les_etapes_demandees.
     appels: list[str] = []
     _patch_chargeurs(monkeypatch, appels)
 
@@ -605,8 +628,9 @@ async def test_run_etl_indicateurs_only_ne_touche_pas_annee_budget(
 
 
 async def test_run_etl_annee_hors_perimetre_logge_un_avertissement(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, db_engine: AsyncEngine
 ) -> None:
+    # `db_engine` : voir le commentaire de test_run_etl_appelle_toutes_les_etapes_demandees.
     appels: list[str] = []
     _patch_chargeurs(monkeypatch, appels)
     monkeypatch.setattr(run.loader, "recalculer_annee_budget", lambda *a, **k: _none_coro())

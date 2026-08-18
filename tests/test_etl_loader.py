@@ -15,6 +15,7 @@ from api.models.action import Action
 from api.models.annee_budget import AnneeBudget
 from api.models.depense import Depense
 from api.models.indicateur_macro import IndicateurMacro
+from api.models.ingestion_log import IngestionLog
 from api.models.mission import Mission
 from api.models.mission_alias import MissionAlias
 from api.models.programme import Programme
@@ -653,3 +654,33 @@ async def test_upsert_indicateurs_macro_insere_puis_met_a_jour(db_session: Async
     assert float(indicateurs[0].pib_courant) == 3_000_000_000_000.0
     assert indicateurs[0].population == 68_500_000
     assert indicateurs[0].source_pib_url == "https://example.test/pib-2024-v2"
+
+
+# ---------------------------------------------------------------------------
+# enregistrer_ingestion_terminee
+# ---------------------------------------------------------------------------
+
+
+async def test_enregistrer_ingestion_terminee_ajoute_une_ligne(
+    db_session: AsyncSession,
+) -> None:
+    avant = (await db_session.execute(select(IngestionLog))).scalars().all()
+    assert avant == []
+
+    await loader.enregistrer_ingestion_terminee(db_session)
+    await db_session.commit()
+
+    lignes = (await db_session.execute(select(IngestionLog))).scalars().all()
+    assert len(lignes) == 1
+    assert lignes[0].termine_a is not None
+
+
+async def test_enregistrer_ingestion_terminee_appelee_plusieurs_fois_ajoute_plusieurs_lignes(
+    db_session: AsyncSession,
+) -> None:
+    await loader.enregistrer_ingestion_terminee(db_session)
+    await loader.enregistrer_ingestion_terminee(db_session)
+    await db_session.commit()
+
+    lignes = (await db_session.execute(select(IngestionLog))).scalars().all()
+    assert len(lignes) == 2

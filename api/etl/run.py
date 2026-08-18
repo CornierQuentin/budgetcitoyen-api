@@ -570,6 +570,7 @@ async def run_etl(
                         db, annee, source_url, psr_par_annee.get(annee, 0.0)
                     )
 
+            await loader.enregistrer_ingestion_terminee(db)
             await db.commit()
             logger.info("ETL termine avec succes, transaction validee")
         except Exception:
