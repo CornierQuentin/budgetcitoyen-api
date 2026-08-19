@@ -34,6 +34,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from api.db.session import engine as _prod_engine
 from api.etl import loader, normalize, run, sources
+from api.etl.normalize import DepenseFiscaleRecord
+from api.models.depense_fiscale import DepenseFiscale, StatutMontant
 from api.models.indicateur_macro import IndicateurMacro
 from api.models.mission import Mission
 from api.models.recette import Recette, TypeRecette
@@ -973,6 +975,37 @@ async def test_charger_indicateurs_enchaine_fetch_normalize_et_load(
     assert indicateur.population == 68_000_000
 
 
+async def test_charger_depenses_fiscales_enchaine_fetch_normalize_et_load(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _fake_get_bytes(_client: httpx.AsyncClient, _url: str) -> bytes:
+        return b"peu-importe"
+
+    record = DepenseFiscaleRecord(
+        annee=sources.DEPENSE_FISCALE_ANNEE,
+        numero="1",
+        categorie="Impôt sur le revenu",
+        sous_categorie="Sous-categorie",
+        sous_sous_categorie=None,
+        libelle="Libelle",
+        beneficiaire="Menages",
+        montant_millions=12.0,
+        statut_montant=StatutMontant.CHIFFRE,
+        methode_chiffrage=None,
+    )
+    monkeypatch.setattr(run, "_get_bytes", _fake_get_bytes)
+    monkeypatch.setattr(normalize, "normalize_depenses_fiscales_xlsx", lambda content, a: [record])
+
+    async with httpx.AsyncClient() as client:
+        await run._charger_depenses_fiscales(db_session, client)
+    await db_session.commit()
+
+    lignes = (await db_session.execute(select(DepenseFiscale))).scalars().all()
+    assert len(lignes) == 1
+    assert lignes[0].annee == sources.DEPENSE_FISCALE_ANNEE
+    assert lignes[0].numero == "1"
+
+
 # ---------------------------------------------------------------------------
 # run_etl: orchestration de haut niveau
 # ---------------------------------------------------------------------------
@@ -998,10 +1031,14 @@ def _patch_chargeurs(monkeypatch: pytest.MonkeyPatch, appels: list[str]) -> None
     async def _fake_charger_indicateurs(db, client):
         appels.append("indicateurs")
 
+    async def _fake_charger_depenses_fiscales(db, client):
+        appels.append("depenses_fiscales")
+
     monkeypatch.setattr(run, "_charger_depenses", _fake_charger_depenses)
     monkeypatch.setattr(run, "_charger_recettes", _fake_charger_recettes)
     monkeypatch.setattr(run, "_charger_recettes_cour_des_comptes", _fake_charger_recettes_ccomptes)
     monkeypatch.setattr(run, "_charger_recettes_legifrance", _fake_charger_recettes_legifrance)
+    monkeypatch.setattr(run, "_charger_depenses_fiscales", _fake_charger_depenses_fiscales)
     monkeypatch.setattr(run, "_charger_indicateurs", _fake_charger_indicateurs)
 
 
@@ -1071,6 +1108,27 @@ async def test_run_etl_route_les_recettes_legifrance(
     assert appels == ["depenses", "recettes_legifrance"]
 
 
+async def test_run_etl_depenses_fiscales_only_ne_touche_pas_annee_budget(
+    monkeypatch: pytest.MonkeyPatch, db_engine: AsyncEngine
+) -> None:
+    # `db_engine` : voir le commentaire de test_run_etl_appelle_toutes_les_etapes_demandees.
+    appels: list[str] = []
+    _patch_chargeurs(monkeypatch, appels)
+
+    async def _fake_recalculer(*_a, **_k):
+        pytest.fail(
+            "recalculer_annee_budget ne doit pas etre appele en mode --depenses-fiscales-only"
+        )
+
+    monkeypatch.setattr(run.loader, "recalculer_annee_budget", _fake_recalculer)
+
+    await run.run_etl(
+        [2021], depenses=False, recettes=False, indicateurs=False, depenses_fiscales=True
+    )
+
+    assert appels == ["depenses_fiscales"]
+
+
 async def test_run_etl_indicateurs_only_ne_touche_pas_annee_budget(
     monkeypatch: pytest.MonkeyPatch, db_engine: AsyncEngine
 ) -> None:
@@ -1128,11 +1186,14 @@ async def test_run_etl_annule_la_transaction_si_une_etape_echoue(
 def test_main_annees_par_defaut_et_toutes_etapes_actives(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    async def _fake_run_etl(annees, *, depenses, recettes, indicateurs=True):
+    async def _fake_run_etl(
+        annees, *, depenses, recettes, indicateurs=True, depenses_fiscales=False
+    ):
         captured["annees"] = list(annees)
         captured["depenses"] = depenses
         captured["recettes"] = recettes
         captured["indicateurs"] = indicateurs
+        captured["depenses_fiscales"] = depenses_fiscales
 
     monkeypatch.setattr(run, "run_etl", _fake_run_etl)
 
@@ -1144,34 +1205,74 @@ def test_main_annees_par_defaut_et_toutes_etapes_actives(monkeypatch: pytest.Mon
         "depenses": True,
         "recettes": True,
         "indicateurs": True,
+        "depenses_fiscales": False,
     }
 
 
 def test_main_depenses_only(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    async def _fake_run_etl(annees, *, depenses, recettes, indicateurs=True):
+    async def _fake_run_etl(
+        annees, *, depenses, recettes, indicateurs=True, depenses_fiscales=False
+    ):
         captured["depenses"] = depenses
         captured["recettes"] = recettes
         captured["indicateurs"] = indicateurs
+        captured["depenses_fiscales"] = depenses_fiscales
 
     monkeypatch.setattr(run, "run_etl", _fake_run_etl)
 
     run.main(["--depenses-only", "--annees", "2024"])
 
-    assert captured == {"depenses": True, "recettes": False, "indicateurs": False}
+    assert captured == {
+        "depenses": True,
+        "recettes": False,
+        "indicateurs": False,
+        "depenses_fiscales": False,
+    }
 
 
 def test_main_indicateurs_only(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    async def _fake_run_etl(annees, *, depenses, recettes, indicateurs=True):
+    async def _fake_run_etl(
+        annees, *, depenses, recettes, indicateurs=True, depenses_fiscales=False
+    ):
         captured["depenses"] = depenses
         captured["recettes"] = recettes
         captured["indicateurs"] = indicateurs
+        captured["depenses_fiscales"] = depenses_fiscales
 
     monkeypatch.setattr(run, "run_etl", _fake_run_etl)
 
     run.main(["--indicateurs-only"])
 
-    assert captured == {"depenses": False, "recettes": False, "indicateurs": True}
+    assert captured == {
+        "depenses": False,
+        "recettes": False,
+        "indicateurs": True,
+        "depenses_fiscales": False,
+    }
+
+
+def test_main_depenses_fiscales_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_run_etl(
+        annees, *, depenses, recettes, indicateurs=True, depenses_fiscales=False
+    ):
+        captured["depenses"] = depenses
+        captured["recettes"] = recettes
+        captured["indicateurs"] = indicateurs
+        captured["depenses_fiscales"] = depenses_fiscales
+
+    monkeypatch.setattr(run, "run_etl", _fake_run_etl)
+
+    run.main(["--depenses-fiscales-only"])
+
+    assert captured == {
+        "depenses": False,
+        "recettes": False,
+        "indicateurs": False,
+        "depenses_fiscales": True,
+    }

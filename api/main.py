@@ -20,6 +20,7 @@ from api.routers import (
     budget,
     budget_perso,
     comparateur,
+    depenses_fiscales,
     health,
     indicateurs,
     marches,
@@ -66,6 +67,7 @@ def create_app() -> FastAPI:
     app.include_router(budget_perso.router, prefix="/api/v1")
     app.include_router(marches.router, prefix="/api/v1")
     app.include_router(indicateurs.router, prefix="/api/v1")
+    app.include_router(depenses_fiscales.router, prefix="/api/v1")
 
     return app
 

@@ -10,10 +10,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.etl import loader
-from api.etl.normalize import DepenseAggregat, MissionAliasRow, MissionYearRow, RecetteAggregat
+from api.etl.normalize import (
+    DepenseAggregat,
+    DepenseFiscaleRecord,
+    MissionAliasRow,
+    MissionYearRow,
+    RecetteAggregat,
+)
 from api.models.action import Action
 from api.models.annee_budget import AnneeBudget
 from api.models.depense import Depense
+from api.models.depense_fiscale import DepenseFiscale, StatutMontant
 from api.models.indicateur_macro import IndicateurMacro
 from api.models.ingestion_log import IngestionLog
 from api.models.mission import Mission
@@ -759,3 +766,80 @@ async def test_enregistrer_ingestion_terminee_appelee_plusieurs_fois_ajoute_plus
 
     lignes = (await db_session.execute(select(IngestionLog))).scalars().all()
     assert len(lignes) == 2
+
+
+def _depense_fiscale_record(numero: str, **overrides: object) -> DepenseFiscaleRecord:
+    defaults: dict = {
+        "annee": 2021,
+        "numero": numero,
+        "categorie": "Impôt sur le revenu",
+        "sous_categorie": "Sous-categorie",
+        "sous_sous_categorie": None,
+        "libelle": "Libelle de la mesure",
+        "beneficiaire": "Menages",
+        "montant_millions": 10.0,
+        "statut_montant": StatutMontant.CHIFFRE,
+        "methode_chiffrage": "Simulation",
+    }
+    defaults.update(overrides)
+    return DepenseFiscaleRecord(**defaults)
+
+
+async def test_upsert_depenses_fiscales_sans_donnees_ne_fait_rien(
+    db_session: AsyncSession,
+) -> None:
+    n = await loader.upsert_depenses_fiscales(db_session, 2021, [])
+
+    assert n == 0
+    assert (await db_session.execute(select(DepenseFiscale))).scalars().all() == []
+
+
+async def test_upsert_depenses_fiscales_insere_les_statuts_non_chiffrables(
+    db_session: AsyncSession,
+) -> None:
+    records = [
+        _depense_fiscale_record("1", statut_montant=StatutMontant.CHIFFRE, montant_millions=42.0),
+        _depense_fiscale_record("2", statut_montant=StatutMontant.EPSILON, montant_millions=None),
+        _depense_fiscale_record(
+            "3", statut_montant=StatutMontant.NON_CALCULABLE, montant_millions=None
+        ),
+        _depense_fiscale_record(
+            "4", statut_montant=StatutMontant.AUCUN_EFFET, montant_millions=None
+        ),
+    ]
+
+    n = await loader.upsert_depenses_fiscales(db_session, 2021, records)
+    await db_session.commit()
+
+    assert n == 4
+    result = await db_session.execute(select(DepenseFiscale).order_by(DepenseFiscale.numero))
+    lignes = result.scalars().all()
+    assert [ligne.statut_montant for ligne in lignes] == [
+        StatutMontant.CHIFFRE,
+        StatutMontant.EPSILON,
+        StatutMontant.NON_CALCULABLE,
+        StatutMontant.AUCUN_EFFET,
+    ]
+    # Les montants non chiffrables restent None, jamais 0.
+    assert [ligne.montant_millions for ligne in lignes[1:]] == [None, None, None]
+
+
+async def test_upsert_depenses_fiscales_remplace_l_annee_sans_toucher_les_autres(
+    db_session: AsyncSession,
+) -> None:
+    await loader.upsert_depenses_fiscales(db_session, 2021, [_depense_fiscale_record("1")])
+    await loader.upsert_depenses_fiscales(db_session, 2022, [_depense_fiscale_record("1")])
+    await db_session.commit()
+
+    await loader.upsert_depenses_fiscales(
+        db_session, 2021, [_depense_fiscale_record("1"), _depense_fiscale_record("2")]
+    )
+    await db_session.commit()
+
+    result = await db_session.execute(select(DepenseFiscale))
+    lignes = result.scalars().all()
+    assert sorted((ligne.annee, ligne.numero) for ligne in lignes) == [
+        (2021, "1"),
+        (2021, "2"),
+        (2022, "1"),
+    ]

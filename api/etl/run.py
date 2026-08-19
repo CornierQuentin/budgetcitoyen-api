@@ -696,6 +696,31 @@ async def _charger_indicateurs(db: AsyncSession, client: httpx.AsyncClient) -> N
 
 
 # ---------------------------------------------------------------------------
+# Etape depenses fiscales (niches fiscales)
+# ---------------------------------------------------------------------------
+
+
+async def _charger_depenses_fiscales(db: AsyncSession, client: httpx.AsyncClient) -> None:
+    """Telecharge, normalise et charge les depenses fiscales (niche fiscale).
+
+    A la difference de `_charger_indicateurs`, cette source ne fournit
+    qu'un seul millesime figé (2021, cf. `sources.DEPENSE_FISCALE_ANNEE`) et
+    ne changera plus jamais: pas de raison de la retelecharger a chaque run
+    complet (`run_etl(depenses_fiscales=False)` par defaut), uniquement via
+    `--depenses-fiscales-only`.
+    """
+    contenu = await _get_bytes(
+        client,
+        sources.attachment_url(
+            sources.DEPENSE_FISCALE_DATASET_ID, sources.DEPENSE_FISCALE_ATTACHMENT_ID
+        ),
+    )
+    records = normalize.normalize_depenses_fiscales_xlsx(contenu, sources.DEPENSE_FISCALE_ANNEE)
+    n = await loader.upsert_depenses_fiscales(db, sources.DEPENSE_FISCALE_ANNEE, records)
+    logger.info("depenses fiscales %d: %d mesures chargees", sources.DEPENSE_FISCALE_ANNEE, n)
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -717,7 +742,12 @@ def _parse_annees(spec: str) -> list[int]:
 
 
 async def run_etl(
-    annees: Iterable[int], *, depenses: bool, recettes: bool, indicateurs: bool = True
+    annees: Iterable[int],
+    *,
+    depenses: bool,
+    recettes: bool,
+    indicateurs: bool = True,
+    depenses_fiscales: bool = False,
 ) -> None:
     annees_list = sorted(set(annees))
     depenses_annees = [a for a in annees_list if a in sources.DEPENSES_ANNEES] if depenses else []
@@ -753,12 +783,13 @@ async def run_etl(
 
     logger.info(
         "demarrage ETL: depenses=%s recettes(opendatasoft)=%s recettes(cour des comptes)=%s "
-        "recettes(legifrance)=%s indicateurs=%s",
+        "recettes(legifrance)=%s indicateurs=%s depenses_fiscales=%s",
         depenses_annees or "aucune",
         recettes_annees or "aucune",
         recettes_annees_ccomptes or "aucune",
         recettes_annees_legifrance or "aucune",
         indicateurs,
+        depenses_fiscales,
     )
 
     source_url_par_annee: dict[int, str] = {}
@@ -788,6 +819,8 @@ async def run_etl(
                 )
             if indicateurs:
                 await _charger_indicateurs(db, client)
+            if depenses_fiscales:
+                await _charger_depenses_fiscales(db, client)
 
             # Recalcule l'agregat annee_budget pour toute annee demandee ou
             # depenses ET recettes sont desormais presentes en base (que ce
@@ -854,14 +887,28 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Ne charger que les indicateurs macro (PIB, population).",
     )
+    groupe.add_argument(
+        "--depenses-fiscales-only",
+        action="store_true",
+        help="Ne charger que les depenses fiscales (niches fiscales).",
+    )
     args = parser.parse_args(argv)
 
     annees = _parse_annees(args.annees)
-    depenses = not (args.recettes_only or args.indicateurs_only)
-    recettes = not (args.depenses_only or args.indicateurs_only)
-    indicateurs = not (args.depenses_only or args.recettes_only)
+    depenses = not (args.recettes_only or args.indicateurs_only or args.depenses_fiscales_only)
+    recettes = not (args.depenses_only or args.indicateurs_only or args.depenses_fiscales_only)
+    indicateurs = not (args.depenses_only or args.recettes_only or args.depenses_fiscales_only)
+    depenses_fiscales = args.depenses_fiscales_only
 
-    asyncio.run(run_etl(annees, depenses=depenses, recettes=recettes, indicateurs=indicateurs))
+    asyncio.run(
+        run_etl(
+            annees,
+            depenses=depenses,
+            recettes=recettes,
+            indicateurs=indicateurs,
+            depenses_fiscales=depenses_fiscales,
+        )
+    )
 
 
 if __name__ == "__main__":

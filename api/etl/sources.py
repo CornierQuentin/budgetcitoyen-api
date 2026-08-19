@@ -538,3 +538,38 @@ def default_depenses_source_url(annee: int) -> str | None:
     if annee in LFI_TEXT_CID_PAR_ANNEE:
         return legifrance_url(LFI_TEXT_CID_PAR_ANNEE[annee])
     return None
+
+
+# --------------------------------------------------------------------------
+# Depenses fiscales (niches fiscales), annexe "Voies et moyens" Tome II du
+# PLF - domaine independant de missions/depenses/recettes/annee_budget (les
+# niches fiscales sont des allegements deja integres dans les recettes
+# fiscales nettes, ne jamais les re-deduire du deficit calcule).
+# --------------------------------------------------------------------------
+
+# Seule edition disponible en format structure (xlsx) sur
+# data.economie.gouv.fr: verifie par sondage direct de l'API - PLF2024/2025/
+# 2026 retournent tous 404 sur ce portail (aucun dataset equivalent, non
+# alimente au-dela de cette edition). Pas d'API "records" pour ce dataset
+# (`has_records: false`) - uniquement le fichier xlsx en piece jointe, meme
+# pattern que DEPENSES_DATASETS_ATTACHMENTS. Vue ponctuelle sur ce seul
+# millesime, pas de serie historique (cf. `annee` gardee sur le modele
+# `DepenseFiscale` pour une future edition, si le portail en publie une).
+DEPENSE_FISCALE_DATASET_ID = "plf2023_voies_et_moyens_t2_liste_des_depenses_fiscales"
+DEPENSE_FISCALE_ATTACHMENT_ID = "plf2023_voies_et_moyens_t2_liste_des_depenses_fiscales_xlsx"
+
+# Feuille "Chiffrages" du xlsx: PAS un seul montant par mesure mais 3
+# colonnes (verifie a l'inspection reelle du fichier, structure non
+# documentee dans la fiche dataset) - "Realisation" annee N-2, "Prevision"
+# N-1, "Prevision" N (le millesime du PLF lui-meme, ici 2023). Piege reel:
+# retenir la colonne N (2023) sous-estimerait fortement le total (75,9 Md EUR
+# sur cette edition, chiffre encore tres incomplet - 300/465 mesures
+# chiffrees, beaucoup de "nc" a cet horizon) car une depense fiscale n'est
+# definitivement connue qu'apres depouillement des declarations fiscales de
+# l'annee suivante. La colonne "Realisation" N-2 (ici 2021) est la seule
+# definitive (pas une prevision) et la plus complete (333/465 mesures
+# chiffrees, somme 89,586 Md EUR - la plus proche de l'ordre de grandeur CDC
+# "~88 Md EUR/an"): c'est elle qui est retenue, PAS le millesime du PLF
+# source. Le bandeau frontend doit donc citer 2021 (dernier realise connu),
+# pas 2023, comme annee des donnees.
+DEPENSE_FISCALE_ANNEE = 2021
