@@ -475,8 +475,7 @@ async def _charger_recettes_legifrance(
         aggregats = normalize.aggregate_recettes(records)
         tous_les_aggregats.extend(aggregats)
         logger.info(
-            "recettes %d (Legifrance/PISTE): %d lignes brutes -> %d types agreges "
-            "(PSR exclus)",
+            "recettes %d (Legifrance/PISTE): %d lignes brutes -> %d types agreges " "(PSR exclus)",
             annee,
             len(records),
             len(aggregats),

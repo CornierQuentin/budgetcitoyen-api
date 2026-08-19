@@ -889,7 +889,7 @@ def test_normalize_depenses_2026_mission_programme_par_align() -> None:
 
 
 def test_normalize_depenses_2026_exclut_dont_titre_2_et_total() -> None:
-    """"Dont titre 2" (memo deja inclus dans le total programme) et "Total"
+    """ "Dont titre 2" (memo deja inclus dans le total programme) et "Total"
     (cross-check uniquement) ne doivent jamais apparaitre comme lignes de
     depense - sous peine de doubler les montants.
     """
