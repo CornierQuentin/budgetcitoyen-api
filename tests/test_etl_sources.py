@@ -109,3 +109,9 @@ def test_2021_couvert_par_recettes_legifrance_pas_depenses() -> None:
     assert url is not None
     assert sources.DEPENSES_ATTACHMENT_IDS[2021]["detaillee"] in url
     assert "legifrance.gouv.fr" not in url
+
+
+def test_parquet_export_url_construit_l_endpoint_exports_parquet() -> None:
+    url = sources.parquet_export_url(sources.MARCHES_DATASET_ID)
+
+    assert url == f"{sources.API_EXPLORE_V21}/decp-2022-marches-valides/exports/parquet"

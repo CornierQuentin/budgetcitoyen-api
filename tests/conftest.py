@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -38,6 +39,11 @@ async def db_engine() -> AsyncGenerator[AsyncEngine, None]:
     engine = create_async_engine(settings.database_url, poolclass=NullPool)
 
     async with engine.begin() as conn:
+        # `pg_trgm` (index GIN sur marche_public.objet_recherche) n'est pas
+        # cree par Base.metadata.create_all (les extensions Postgres ne font
+        # pas partie du metadata SQLAlchemy) - doit exister avant, comme en
+        # production ou la migration Alembic 0006 s'en charge.
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.run_sync(Base.metadata.create_all)
 
     yield engine

@@ -721,6 +721,31 @@ async def _charger_depenses_fiscales(db: AsyncSession, client: httpx.AsyncClient
 
 
 # ---------------------------------------------------------------------------
+# Etape marches publics (DECP)
+# ---------------------------------------------------------------------------
+
+
+async def _charger_marches(db: AsyncSession, client: httpx.AsyncClient) -> None:
+    """Telecharge (export Parquet en masse), normalise et charge l'integralite
+    des ~689 000 marches publics.
+
+    A la difference de `depenses`/`recettes` (rechargees a chaque run par
+    defaut) mais pour une raison differente de `depenses_fiscales` (millesime
+    fige): cette source EST mise a jour quotidiennement, mais retelecharger
+    82,6 Mo et refaire un delete+reinsert complet de la table (5 index a
+    reconstruire, dont un GIN trigram) a CHAQUE run de routine est un cout
+    recurrent reel pour un domaine ou la fraicheur au jour pres n'a aucune
+    valeur produit - reste `False` par defaut (`run_etl(marches=False)`),
+    uniquement via `--marches-only`, sur une cadence decouplee (recommande:
+    hebdomadaire, pas a chaque run depenses/recettes).
+    """
+    contenu = await _get_bytes(client, sources.parquet_export_url(sources.MARCHES_DATASET_ID))
+    batches = normalize.normalize_marches_parquet(contenu)
+    n = await loader.upsert_marches(db, batches)
+    logger.info("marches publics: %d lignes chargees", n)
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -748,6 +773,7 @@ async def run_etl(
     recettes: bool,
     indicateurs: bool = True,
     depenses_fiscales: bool = False,
+    marches: bool = False,
 ) -> None:
     annees_list = sorted(set(annees))
     depenses_annees = [a for a in annees_list if a in sources.DEPENSES_ANNEES] if depenses else []
@@ -783,13 +809,14 @@ async def run_etl(
 
     logger.info(
         "demarrage ETL: depenses=%s recettes(opendatasoft)=%s recettes(cour des comptes)=%s "
-        "recettes(legifrance)=%s indicateurs=%s depenses_fiscales=%s",
+        "recettes(legifrance)=%s indicateurs=%s depenses_fiscales=%s marches=%s",
         depenses_annees or "aucune",
         recettes_annees or "aucune",
         recettes_annees_ccomptes or "aucune",
         recettes_annees_legifrance or "aucune",
         indicateurs,
         depenses_fiscales,
+        marches,
     )
 
     source_url_par_annee: dict[int, str] = {}
@@ -821,6 +848,8 @@ async def run_etl(
                 await _charger_indicateurs(db, client)
             if depenses_fiscales:
                 await _charger_depenses_fiscales(db, client)
+            if marches:
+                await _charger_marches(db, client)
 
             # Recalcule l'agregat annee_budget pour toute annee demandee ou
             # depenses ET recettes sont desormais presentes en base (que ce
@@ -892,13 +921,20 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Ne charger que les depenses fiscales (niches fiscales).",
     )
+    groupe.add_argument(
+        "--marches-only",
+        action="store_true",
+        help="Ne charger que les marches publics (DECP, ~689 000 lignes).",
+    )
     args = parser.parse_args(argv)
 
     annees = _parse_annees(args.annees)
-    depenses = not (args.recettes_only or args.indicateurs_only or args.depenses_fiscales_only)
-    recettes = not (args.depenses_only or args.indicateurs_only or args.depenses_fiscales_only)
-    indicateurs = not (args.depenses_only or args.recettes_only or args.depenses_fiscales_only)
+    seulement_un_domaine_a_part = args.depenses_fiscales_only or args.marches_only
+    depenses = not (args.recettes_only or args.indicateurs_only or seulement_un_domaine_a_part)
+    recettes = not (args.depenses_only or args.indicateurs_only or seulement_un_domaine_a_part)
+    indicateurs = not (args.depenses_only or args.recettes_only or seulement_un_domaine_a_part)
     depenses_fiscales = args.depenses_fiscales_only
+    marches = args.marches_only
 
     asyncio.run(
         run_etl(
@@ -907,6 +943,7 @@ def main(argv: list[str] | None = None) -> None:
             recettes=recettes,
             indicateurs=indicateurs,
             depenses_fiscales=depenses_fiscales,
+            marches=marches,
         )
     )
 

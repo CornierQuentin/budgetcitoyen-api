@@ -43,12 +43,15 @@ import logging
 import re
 import unicodedata
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import date
 from typing import Any
 
 import pandas as pd
+import pyarrow.parquet as pq
 
+from api.core.text import normaliser_pour_recherche
 from api.etl.sources import CODE_LIGNE_RECETTE_VERS_TYPE
 from api.models.depense_fiscale import StatutMontant
 from api.models.recette import TypeRecette
@@ -1903,3 +1906,123 @@ def normalize_depenses_fiscales_xlsx(content: bytes, annee: int) -> list[Depense
             )
         )
     return records
+
+
+# ---------------------------------------------------------------------------
+# Marches publics (DECP, dataset decp-2022-marches-valides)
+# ---------------------------------------------------------------------------
+
+# Colonnes reellement utilisees parmi les 54 de la source (cf. plan du
+# chantier pour la liste des colonnes ecartees delibrement: modifications,
+# sous-traitance, geolocalisation...).
+_MARCHES_COLONNES_SOURCE = (
+    "id",
+    "nature",
+    "objet",
+    "codecpv",
+    "procedure",
+    "titulaire_id_1",
+    "titulaire_typeidentifiant_1",
+    "acheteur_id",
+    "dureemois",
+    "datenotification",
+    "datepublicationdonnees",
+    "montant",
+    "formeprix",
+    "offresrecues",
+    "marcheinnovant",
+)
+
+
+@dataclass(frozen=True)
+class MarcheRecord:
+    """Un marche public normalise, pret a l'upsert (voir MarchePublic)."""
+
+    marche_id_source: str
+    nature: str | None
+    objet: str
+    objet_recherche: str
+    codecpv: str
+    codecpv_division: str
+    procedure: str | None
+    acheteur_siret: str
+    titulaire_siret: str
+    titulaire_id_type: str | None
+    dureemois: int | None
+    datenotification: date
+    datepublicationdonnees: date | None
+    montant: float
+    formeprix: str | None
+    offresrecues: int | None
+    marcheinnovant: bool | None
+
+
+def _parse_offresrecues(raw: object) -> int | None:
+    """`offresrecues` est une colonne texte cote source, PAS un entier: une
+    part significative des lignes reelles (131 706 sur 689 062, soit ~19%)
+    vaut le jeton "MQ NC" (donnee manquante/non connue) plutot qu'un nombre -
+    ne jamais planter dessus, ni la confondre avec 0 offres recues.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text.isdigit():
+        return None
+    return int(text)
+
+
+def _parse_marcheinnovant(raw: object) -> bool | None:
+    """Chaine libre "oui"/"non" cote source, jamais un booleen strict."""
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    if text == "oui":
+        return True
+    if text == "non":
+        return False
+    return None
+
+
+def normalize_marches_parquet(
+    content: bytes, batch_size: int = 5000
+) -> Iterator[list[MarcheRecord]]:
+    """Normalise le xlsx Parquet DECP (voir `api.etl.sources.MARCHES_DATASET_ID`)
+    par lots plutot qu'en une seule liste complete.
+
+    A la difference de tous les autres normaliseurs de ce module (quelques
+    milliers de lignes au plus), cette source compte ~689 000 lignes:
+    materialiser la liste complete de dataclasses en memoire en une fois est
+    un risque reel sur un petit deploiement. `columns=` exploite le format
+    colonnaire de Parquet pour ne decoder que les 15 colonnes source
+    reellement utilisees (sur 54), sans jamais passer par pandas.
+    """
+    parquet_file = pq.ParquetFile(io.BytesIO(content))
+    for batch in parquet_file.iter_batches(
+        batch_size=batch_size, columns=list(_MARCHES_COLONNES_SOURCE)
+    ):
+        records = []
+        for row in batch.to_pylist():
+            codecpv = (row["codecpv"] or "").strip()
+            objet = row["objet"] or ""
+            records.append(
+                MarcheRecord(
+                    marche_id_source=str(row["id"] or ""),
+                    nature=row["nature"],
+                    objet=objet,
+                    objet_recherche=normaliser_pour_recherche(objet),
+                    codecpv=codecpv,
+                    codecpv_division=codecpv[:2],
+                    procedure=row["procedure"],
+                    acheteur_siret=row["acheteur_id"] or "",
+                    titulaire_siret=row["titulaire_id_1"] or "",
+                    titulaire_id_type=row["titulaire_typeidentifiant_1"],
+                    dureemois=row["dureemois"],
+                    datenotification=row["datenotification"],
+                    datepublicationdonnees=row["datepublicationdonnees"],
+                    montant=float(row["montant"]),
+                    formeprix=row["formeprix"],
+                    offresrecues=_parse_offresrecues(row["offresrecues"]),
+                    marcheinnovant=_parse_marcheinnovant(row["marcheinnovant"]),
+                )
+            )
+        yield records

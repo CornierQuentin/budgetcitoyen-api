@@ -30,6 +30,7 @@ from api.etl.normalize import (
     normalize_depenses_fiscales_xlsx,
     normalize_depenses_legifrance,
     normalize_depenses_records_json,
+    normalize_marches_parquet,
     normalize_mission_name,
     normalize_pib_complement_insee_premiere,
     normalize_pib_csv,
@@ -1160,3 +1161,52 @@ def test_normalize_depenses_fiscales_xlsx_exclut_les_non_chiffrables_d_un_total_
     assert all(r.montant_millions is None for r in non_chiffres)
     total = sum(r.montant_millions for r in chiffres)
     assert total == pytest.approx(118.0)
+
+
+# ---------------------------------------------------------------------------
+# Marches publics (DECP, dataset decp-2022-marches-valides)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_marches_parquet_lit_les_10_marches_de_la_fixture() -> None:
+    """La fixture est un extrait REEL de 10 marches couvrant les pieges
+    confirmes a l'inspection directe du fichier reel: 2 lignes partageant le
+    meme `id` source "2024" (l'id n'est pas une cle fiable, pas de dedup
+    attendu), 2 lignes `titulaire_typeidentifiant_1 == "TVA"` (pas SIRET), 2
+    lignes `codecpv` prefixe "INX ", plusieurs lignes `offresrecues ==
+    "MQ NC"` (non numerique)."""
+    raw = _load_bytes("marches_sample.parquet")
+    batches = list(normalize_marches_parquet(raw, batch_size=4))
+
+    records = [r for batch in batches for r in batch]
+    assert len(records) == 10
+    # Chunking respecte: 3 lots de 4/4/2 pour 10 enregistrements.
+    assert [len(b) for b in batches] == [4, 4, 2]
+
+    ids_2024 = [r for r in records if r.marche_id_source == "2024"]
+    assert len(ids_2024) == 2  # pas de dedup: la collision d'id est preservee telle quelle
+
+    non_siret = [r for r in records if r.titulaire_id_type == "TVA"]
+    assert len(non_siret) == 2
+
+    codes_inx = [r for r in records if r.codecpv.startswith("INX")]
+    assert len(codes_inx) == 2
+    assert all(r.codecpv_division == "IN" for r in codes_inx)
+
+    sans_offres = [r for r in records if r.offresrecues is None]
+    assert len(sans_offres) > 0  # au moins un "MQ NC" -> None, jamais 0
+
+    premier = records[0]
+    assert premier.marche_id_source == "2024202400014"
+    assert premier.objet_recherche == "services de telecommunications - lot 02 - telephonie mobile"
+    assert premier.codecpv_division == "64"
+    assert premier.marcheinnovant is True
+    assert premier.offresrecues == 2
+
+
+def test_normalize_marches_parquet_marcheinnovant_oui_non_convertis_en_booleen() -> None:
+    raw = _load_bytes("marches_sample.parquet")
+    records = [r for batch in normalize_marches_parquet(raw) for r in batch]
+
+    assert any(r.marcheinnovant is True for r in records)
+    assert any(r.marcheinnovant is False for r in records)

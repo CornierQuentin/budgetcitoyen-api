@@ -6,6 +6,8 @@ convention que les tests de routers), sur la base de test isolee garantie
 par `conftest.py`.
 """
 
+import datetime
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +15,7 @@ from api.etl import loader
 from api.etl.normalize import (
     DepenseAggregat,
     DepenseFiscaleRecord,
+    MarcheRecord,
     MissionAliasRow,
     MissionYearRow,
     RecetteAggregat,
@@ -23,6 +26,7 @@ from api.models.depense import Depense
 from api.models.depense_fiscale import DepenseFiscale, StatutMontant
 from api.models.indicateur_macro import IndicateurMacro
 from api.models.ingestion_log import IngestionLog
+from api.models.marche_public import MarchePublic
 from api.models.mission import Mission
 from api.models.mission_alias import MissionAlias
 from api.models.programme import Programme
@@ -843,3 +847,91 @@ async def test_upsert_depenses_fiscales_remplace_l_annee_sans_toucher_les_autres
         (2021, "2"),
         (2022, "1"),
     ]
+
+
+def _marche_record(marche_id_source: str, **overrides: object) -> MarcheRecord:
+    defaults: dict = {
+        "marche_id_source": marche_id_source,
+        "nature": "Marché",
+        "objet": "Objet du marché",
+        "objet_recherche": "objet du marche",
+        "codecpv": "45000000-7",
+        "codecpv_division": "45",
+        "procedure": "Procédure adaptée",
+        "acheteur_siret": "12345678900011",
+        "titulaire_siret": "98765432100022",
+        "titulaire_id_type": "SIRET",
+        "dureemois": 12,
+        "datenotification": datetime.date(2024, 1, 1),
+        "datepublicationdonnees": datetime.date(2024, 1, 5),
+        "montant": 10000.0,
+        "formeprix": "Forfaitaire",
+        "offresrecues": 3,
+        "marcheinnovant": False,
+    }
+    defaults.update(overrides)
+    return MarcheRecord(**defaults)
+
+
+async def test_upsert_marches_sans_lots_ne_fait_rien(db_session: AsyncSession) -> None:
+    n = await loader.upsert_marches(db_session, [])
+
+    assert n == 0
+    assert (await db_session.execute(select(MarchePublic))).scalars().all() == []
+
+
+async def test_upsert_marches_ignore_les_lots_vides(db_session: AsyncSession) -> None:
+    """Un generateur streamant depuis pyarrow peut produire un lot vide (fin
+    de fichier) - ne doit jamais lever ni inserer de valeurs pour ce lot."""
+    batches = [[], [_marche_record("1")], []]
+
+    n = await loader.upsert_marches(db_session, batches)
+    await db_session.commit()
+
+    assert n == 1
+    lignes = (await db_session.execute(select(MarchePublic))).scalars().all()
+    assert len(lignes) == 1
+
+
+async def test_upsert_marches_charge_plusieurs_lots(db_session: AsyncSession) -> None:
+    batches = [
+        [_marche_record("1"), _marche_record("2")],
+        [_marche_record("3")],
+    ]
+
+    n = await loader.upsert_marches(db_session, batches)
+    await db_session.commit()
+
+    assert n == 3
+    lignes = (await db_session.execute(select(MarchePublic))).scalars().all()
+    assert sorted(ligne.marche_id_source for ligne in lignes) == ["1", "2", "3"]
+
+
+async def test_upsert_marches_ne_deduplique_pas_les_id_collisionnants(
+    db_session: AsyncSession,
+) -> None:
+    """L'id source n'est pas une cle fiable (verifie sur les donnees reelles):
+    deux enregistrements avec le meme marche_id_source doivent tous les deux
+    etre charges, jamais deduplique/ecrase silencieusement."""
+    batches = [[_marche_record("2024"), _marche_record("2024")]]
+
+    n = await loader.upsert_marches(db_session, batches)
+    await db_session.commit()
+
+    assert n == 2
+    lignes = (await db_session.execute(select(MarchePublic))).scalars().all()
+    assert len(lignes) == 2
+    assert all(ligne.marche_id_source == "2024" for ligne in lignes)
+
+
+async def test_upsert_marches_recharge_integralement_la_table(
+    db_session: AsyncSession,
+) -> None:
+    await loader.upsert_marches(db_session, [[_marche_record("ancien")]])
+    await db_session.commit()
+
+    await loader.upsert_marches(db_session, [[_marche_record("nouveau")]])
+    await db_session.commit()
+
+    lignes = (await db_session.execute(select(MarchePublic))).scalars().all()
+    assert [ligne.marche_id_source for ligne in lignes] == ["nouveau"]
