@@ -55,19 +55,24 @@ Pour 2016-2020, 2022 et 2023, les recettes sont reconstituees a partir d'une
 source differente: les rapports annuels "Le budget de l'Etat en <annee>" de
 la Cour des comptes (voir RECETTES_COUR_DES_COMPTES_* ci-dessous et le
 docstring de `api.etl.normalize.normalize_recettes_cour_des_comptes`). 2015
-et 2021 restent des trous reels (aucune des deux sources ne fournit un
-tableau exploitable pour ces annees - voir ces memes constantes).
+et 2021 sont couverts par une troisieme source (voir ci-dessous, LFI via
+l'API Legifrance) plutot que par le portail data.economie.gouv.fr, qui n'en
+fournit aucun dataset exploitable pour ces 2 millesimes.
 
-- 2026: source radicalement differente des annees precedentes - aucun
-  dataset data.economie.gouv.fr n'existe pour ce millesime (verifie: portail
-  non alimente au-dela de 2025 au moment de l'implementation). Depenses ET
-  recettes proviennent toutes deux du texte meme de la LFI 2026 (loi n°
-  2026-103 du 19 fevrier 2026, JORF n°0043 du 20/02/2026), recupere via
-  l'API officielle Legifrance (plateforme PISTE, OAuth2 client_credentials -
-  voir PISTE_* dans `api.core.config.Settings`), PAS via une piece jointe ou
-  un dataset "records": Legifrance bloque les requetes non-navigateur
-  (Cloudflare) sur son site public, mais l'API PISTE elle est accessible en
-  direct par httpx une fois authentifiee.
+- 2015, 2021, 2026: source radicalement differente des annees precedentes -
+  le texte meme de la LFI, recupere via l'API officielle Legifrance
+  (plateforme PISTE, OAuth2 client_credentials - voir PISTE_* dans
+  `api.core.config.Settings`), PAS via une piece jointe ou un dataset
+  "records": Legifrance bloque les requetes non-navigateur (Cloudflare) sur
+  son site public, mais l'API PISTE elle est accessible en direct par httpx
+  une fois authentifiee. Introduite pour 2026 (aucun dataset
+  data.economie.gouv.fr n'existe pour ce millesime, portail non alimente
+  au-dela de 2025), puis reutilisee TELLE QUELLE (meme normalizer) pour
+  combler les trous 2015/2021 identifies au chantier 5 - format verifie
+  identique sur les 3 annees (memes codes de ligne stables, meme structure
+  de tableau). 2021 n'y figure QUE pour les recettes: ses depenses sont
+  deja couvertes par DEPENSES_DATASETS_ATTACHMENTS[2021] (source plus
+  ancienne, deja en place).
 
   La reponse de `POST /consult/jorf` (voir `LFI_TEXT_CID_PAR_ANNEE`) est un
   JSON de l'ARTICULATION LEGALE du texte (sections/articles recursifs), pas
@@ -77,15 +82,17 @@ tableau exploitable pour ces annees - voir ces memes constantes).
   d'un seul article sans numero repere par la marque textuelle "ETATS
   LEGISLATIFS ANNEXES" (PAS par un id d'article fige, qui pourrait changer
   en cas de texte rectificatif) - voir
-  `api.etl.run._extract_etats_html`/`api.etl.normalize.normalize_depenses_2026`/
-  `normalize_recettes_legifrance_2026` pour le detail du parsing.
+  `api.etl.run._extract_etats_html`/`api.etl.normalize.normalize_depenses_legifrance`/
+  `normalize_recettes_legifrance` pour le detail du parsing.
 
   Etat B ne fournit NI code mission NI decomposition par action (seulement
   Mission -> Programme, avec une ligne memo "Dont titre 2" par programme, a
   exclure de toute somme - deja incluse dans le total du programme): repli
   sur le slug pour l'identite mission (meme mecanisme que 2013/2014/2016/
   2017) et action synthetique unique par programme (limitation reelle de la
-  source, documentee, pas un bug).
+  source, documentee, pas un bug). La ligne "Total" de controle est ABSENTE
+  pour la LFI 2015 (presente pour 2021/2026) - verification par trajectoire
+  plutot que par egalite exacte pour cette annee-la.
 
   Etat A inclut directement les prelevements sur recettes (PSR, categorie
   "3." du tableau, sous-categories "31." collectivites et "32." Union
@@ -98,7 +105,10 @@ tableau exploitable pour ces annees - voir ces memes constantes).
   (`CODE_LIGNE_RECETTE_VERS_TYPE` etendu ci-dessous) pour preserver la
   continuite de la serie dans le comparateur/historique, decision validee
   explicitement avec l'utilisateur plutot que de les laisser tomber dans
-  AUTRES par defaut.
+  AUTRES par defaut. L'Etat A de la LFI 2015 est exprime en MILLIERS
+  d'euros (Etat B de la MEME loi deja en euros - asymetrie au sein d'un
+  seul document) - voir `LFI_ETAT_A_MILLIERS_EUROS` et le parametre
+  `unite_milliers` des 2 fonctions ci-dessus.
 """
 
 from api.core.config import get_settings
@@ -204,12 +214,12 @@ DEPENSES_ATTACHMENT_IDS: dict[int, dict[str, str]] = {
     },
 }
 
-# Toutes les annees de depenses couvertes par cette passe d'ingestion. 2015
-# reste un trou reel (voir le docstring de `api.etl.run` pour son detail).
+# Toutes les annees de depenses couvertes par cette passe d'ingestion.
 DEPENSES_ANNEES: tuple[int, ...] = (
     2012,
     2013,
     2014,
+    2015,
     2016,
     2017,
     2018,
@@ -225,8 +235,16 @@ DEPENSES_ANNEES: tuple[int, ...] = (
 
 # Identifiant Legifrance (textCid) du texte de la LFI par annee, pour
 # `POST /consult/jorf` de l'API PISTE (voir docstring de module ci-dessus).
+# Sert a la fois aux depenses (Etat B) et aux recettes (Etat A) - PAS
+# forcement les deux pour chaque annee: 2021 n'y figure QUE pour les
+# recettes (ses depenses sont deja couvertes par
+# DEPENSES_DATASETS_ATTACHMENTS[2021], une source plus ancienne et deja en
+# place - le dispatch de `api.etl.run._fetch_depenses_annee` route 2021 vers
+# cette branche AVANT d'atteindre celle-ci, aucun conflit).
 LFI_TEXT_CID_PAR_ANNEE: dict[int, str] = {
-    2026: "JORFTEXT000053508155",
+    2015: "JORFTEXT000029988857",  # LOI n° 2014-1654 du 29 decembre 2014
+    2021: "JORFTEXT000042753580",  # LOI n° 2020-1721 du 29 decembre 2020 (recettes seulement)
+    2026: "JORFTEXT000053508155",  # LOI n° 2026-103 du 19 fevrier 2026
 }
 
 # Annees de recettes couvertes par la source Legifrance/PISTE - distincte de
@@ -234,6 +252,44 @@ LFI_TEXT_CID_PAR_ANNEE: dict[int, str] = {
 # COMPTES_ANNEES: un meme millesime ne doit jamais apparaitre dans plusieurs
 # de ces 3 tuples (double traitement non gere par `api.etl.run.run_etl`).
 RECETTES_LEGIFRANCE_ANNEES: tuple[int, ...] = tuple(sorted(LFI_TEXT_CID_PAR_ANNEE))
+
+# Annees dont l'Etat A (recettes + PSR) de la source Legifrance/PISTE est
+# exprime en MILLIERS d'euros plutot qu'en euros - verifie dans l'en-tete de
+# la table source ("(En milliers d'euros)"). Piege reel: Etat B de la MEME
+# loi 2015 est deja en euros (asymetrie au sein d'un seul document, valeurs
+# de mission ~milliards coherentes seulement si NON multipliees) - ce
+# multiplicateur ne doit donc JAMAIS s'appliquer aux depenses, uniquement
+# aux recettes/PSR d'Etat A. A revalider explicitement (pas a supposer) pour
+# toute annee future ajoutee a cette source.
+LFI_ETAT_A_MILLIERS_EUROS: tuple[int, ...] = (2015,)
+
+# Annees Legifrance necessitant un rattrapage brut/net cote recettes
+# (`api.etl.run._charger_recettes_legifrance`), limite au seul programme
+# "Remboursements et degrevements d'impots d'Etat" (PAS "...d'impots
+# locaux") - cf. `api.etl.loader.get_remboursements_degrevements_impots_
+# etat_cp`. Piege reel: ce n'est PAS une regle generale de methodologie
+# budgetaire, juste une convention constatee sur cette seule annee -
+# verifie explicitement pour chacune des 3 annees Legifrance disponibles
+# en comparant le deficit calcule au tableau d'equilibre officiel (l'
+# article qui precede immediatement Etat A dans le texte de loi): la LFI
+# 2026 (article 147) a besoin de ce rattrapage cible pour retomber sur son
+# solde officiel (-133,5 Md EUR, sinon ~274,7 Md EUR calcules). LES LFI
+# 2015 (article 49) ET 2021 (article 93) N'ONT BESOIN D'AUCUN RATTRAPAGE -
+# ni celui-ci ni la variante "mission entiere" (`api.etl.loader.
+# get_remboursements_degrevements_cp`, utilisee pour la Cour des comptes):
+# la somme brute de leurs lignes Etat A (hors PSR) correspond DEJA
+# exactement a la ligne "recettes brutes" de leur propre tableau
+# d'equilibre officiel, comparee a des depenses elles-memes brutes - la
+# mission "Remboursements et degrevements" s'annule mathematiquement des
+# 2 cotes de l'equation sans qu'aucun ajustement soit necessaire. Bug reel
+# trouve en verifiant chaque annee individuellement (voir la docstring de
+# `api.etl.run._charger_recettes_legifrance` pour le detail complet des 2
+# essais errones - "mission entiere" sur 2015 donnait un surplus
+# implausible, "impots d'Etat seul" sur 2021 donnait un deficit trop
+# faible) plutot que de supposer qu'une convention verifiee sur une annee
+# se generalise. Toute annee future ajoutee a cette source doit etre
+# revalidee contre son propre article d'equilibre.
+LFI_REMBOURSEMENTS_IMPOTS_ETAT_SEUL: tuple[int, ...] = (2026,)
 
 # --------------------------------------------------------------------------
 # Recettes: seules 2024 et 2025 disposent d'un dataset "recettes du budget

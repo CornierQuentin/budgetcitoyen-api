@@ -229,6 +229,14 @@ async def get_remboursements_degrevements_cp(db: AsyncSession, annee: int) -> fl
     calcul du deficit, aux depenses deja chargees par le pipeline
     "depenses" existant (`upsert_depenses`).
 
+    Note (source Legifrance/PISTE, 2015/2021/2026): ce rattrapage "mission
+    entiere" a ete essaye puis ABANDONNE pour les annees Legifrance apres
+    verification contre leur propre article d'equilibre officiel - voir
+    `get_remboursements_degrevements_impots_etat_cp` (utilise pour 2026
+    uniquement) et la docstring de `api.etl.run._charger_recettes_
+    legifrance` pour le detail complet (2015/2021 n'ont besoin d'AUCUN
+    rattrapage, ni celui-ci ni l'autre).
+
     Constat (verifie a l'execution reelle lors de l'ingestion des recettes
     2016-2023): `upsert_depenses` somme TOUTES les missions du budget
     general, y compris "Remboursements et degrevements" (code_mission
@@ -274,18 +282,9 @@ async def get_remboursements_degrevements_cp(db: AsyncSession, annee: int) -> fl
 async def get_remboursements_degrevements_impots_etat_cp(db: AsyncSession, annee: int) -> float:
     """Retourne le CP du SEUL programme "Remboursements et degrevements d'impots
     d'Etat" (PAS "...d'impots locaux", cf. ci-dessous) de la mission
-    "Remboursements et degrevements".
-
-    A la difference de `get_remboursements_degrevements_cp` (qui somme la
-    mission ENTIERE, les deux programmes "impots d'Etat" et "impots
-    locaux" - correct pour regrossir les recettes fiscales de la Cour des
-    comptes, dont le "tableau d'equilibre" nette explicitement les DEUX),
-    la source Legifrance/PISTE (LFI 2026+, Etat A) ne nette QUE les
-    remboursements/degrevements d'impots d'ETAT dans ses propres montants
-    "nets" (ex "Impot net sur le revenu") - les remboursements d'impots
-    LOCAUX (taxe fonciere, CFE...) ne sont jamais deduits d'une recette
-    d'Etat (ce ne sont pas des recettes d'Etat), et restent donc une
-    depense budget general reelle a part entiere, PAS a regrossir.
+    "Remboursements et degrevements". Usage: SEULEMENT les annees listees
+    dans `api.etl.sources.LFI_REMBOURSEMENTS_IMPOTS_ETAT_SEUL` (2026
+    actuellement, source Legifrance/PISTE).
 
     Bug reel trouve et corrige a l'execution du run complet sur la LFI
     2026: en reutilisant `get_remboursements_degrevements_cp` (mission
@@ -294,14 +293,41 @@ async def get_remboursements_degrevements_impots_etat_cp(db: AsyncSession, annee
     EUR) au lieu des ~133,5 Md EUR officiels (tableau d'equilibre, article
     147 de la loi).
 
-    Cette annee-la (2026), aucun code n'est disponible ni pour la mission
-    (`code_mission=""`, cf. `api.etl.normalize.normalize_depenses_2026`) ni
-    pour les programmes (`programme.code` est un hash, non lisible) -
-    recherche donc par SLUG de mission et par LIBELLE de programme (motif
-    "impots d'Etat", ne doit PAS matcher "impots locaux"). Retourne 0.0 si
-    aucune ligne ne correspond (ex: libelle du programme different d'une
-    annee a l'autre - a revalider si ce cas se presente, meme logique de
-    repli silencieux que `get_remboursements_degrevements_cp`).
+    ATTENTION - ceci n'est PAS une regle generale de methodologie
+    budgetaire ni meme une regle Legifrance-specifique (ne pas supposer
+    qu'elle s'applique a une nouvelle annee sans verifier): la LFI 2026 est
+    la SEULE des 3 annees Legifrance verifiees a necessiter un rattrapage
+    a ce niveau de granularite. Les LFI 2015 (article 49) et 2021 (article
+    93) deduisent bien la mission ENTIERE dans leur PROPRE tableau
+    d'equilibre officiel (article 49: "99 475" M EUR ; article 93: "129
+    334" M EUR, chacune EXACTEMENT la somme des 2 programmes) - mais cela
+    ne signifie PAS qu'il faille appliquer `get_remboursements_
+    degrevements_cp` (mission entiere) a ces 2 annees non plus: leurs
+    montants d'Etat A sont DEJA sur une base comparable aux depenses BRUTES
+    sans AUCUN rattrapage (verifie: la somme brute des lignes d'Etat A hors
+    PSR correspond EXACTEMENT a la ligne "recettes brutes" de leur propre
+    tableau d'equilibre - le rattrapage de la mission "Remboursements et
+    degrevements" s'annule mathematiquement des 2 cotes de l'equation sans
+    intervention). Erreurs reelles trouvees en verifiant chaque annee
+    individuellement plutot que d'assumer qu'une regle se generalise: un
+    essai avec cette fonction (impots d'Etat seul) sur 2021 donnait un
+    deficit de 43,0 Md EUR au lieu du solde officiel -172,4 Md EUR; un
+    essai avec `get_remboursements_degrevements_cp` (mission entiere) sur
+    2015 donnait -13,6 Md EUR (surplus implausible) au lieu de -74,2 Md EUR
+    officiels - dans les 2 cas, seule l'absence de RATTRAPAGE DU TOUT etait
+    correcte pour ces 2 annees. Voir la docstring de `api.etl.run.
+    _charger_recettes_legifrance` pour le detail complet et le
+    raisonnement algebrique qui explique cette annulation.
+
+    Sur cette source (Legifrance/PISTE), aucun code n'est disponible ni pour
+    la mission (`code_mission=""`, cf. `api.etl.normalize.
+    normalize_depenses_legifrance`) ni pour les programmes (`programme.code`
+    est un hash, non lisible) - recherche donc par SLUG de mission et par
+    LIBELLE de programme (motif "impots d'Etat", ne doit PAS matcher
+    "impots locaux"). Retourne 0.0 si aucune ligne ne correspond (ex:
+    libelle du programme different d'une annee a l'autre - a revalider si
+    ce cas se presente, meme logique de repli silencieux que
+    `get_remboursements_degrevements_cp`).
     """
     total = await db.scalar(
         select(func.coalesce(func.sum(Depense.cp), 0))

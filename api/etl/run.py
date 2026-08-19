@@ -4,17 +4,18 @@ Usage:
     python -m api.etl.run [--annees 2012-2026]
         [--depenses-only | --recettes-only | --indicateurs-only]
 
-Ingere les depenses de l'Etat (budget general) pour 2012-2014 et 2016-2026,
-les recettes du budget general pour 2016-2020/2022-2026 (trois sources
-cohabitent: le portail data.economie.gouv.fr pour 2024-2025, les rapports
-annuels "Le budget de l'Etat en <annee>" de la Cour des comptes pour
-2016-2020 et 2022-2023, et l'API Legifrance/PISTE pour 2026 - voir
-`_charger_recettes`, `_charger_recettes_cour_des_comptes` et
-`_charger_recettes_legifrance` respectivement), et les indicateurs macro
-(PIB nominal, population - voir `_charger_indicateurs`). 2015 (cote
-depenses) et 2021 (cote recettes) restent des trous reels, hors perimetre de
-cette passe d'ingestion (voir `api.etl.sources.
-RECETTES_COUR_DES_COMPTES_ZIP_URLS` pour le detail de 2021).
+Ingere les depenses de l'Etat (budget general) pour 2012-2026 (2015 via
+l'API Legifrance/PISTE, cf. ci-dessous), les recettes du budget general
+pour 2015-2026 en integralite (trois sources cohabitent: le portail
+data.economie.gouv.fr pour 2024-2025, les rapports annuels "Le budget de
+l'Etat en <annee>" de la Cour des comptes pour 2016-2020 et 2022-2023, et
+l'API Legifrance/PISTE pour 2015/2021/2026 - voir `_charger_recettes`,
+`_charger_recettes_cour_des_comptes` et `_charger_recettes_legifrance`
+respectivement), et les indicateurs macro (PIB nominal, population - voir
+`_charger_indicateurs`). Depenses 2006-2010 restent un trou reel, hors
+perimetre de cette passe d'ingestion (verifie: Etat A/B absent du JSON
+structure de l'API Legifrance pour ces annees, contrairement a 2015+ -
+necessiterait un parsing PDF distinct).
 """
 
 from __future__ import annotations
@@ -318,7 +319,7 @@ async def _fetch_depenses_annee(
         text_cid = sources.LFI_TEXT_CID_PAR_ANNEE[annee]
         jorf = await _fetch_lfi_jorf(client, text_cid)
         _etat_a, etat_b = _extract_etats_html(jorf)
-        records = normalize.normalize_depenses_2026(etat_b, annee)
+        records = normalize.normalize_depenses_legifrance(etat_b, annee)
         source_url = sources.legifrance_url(text_cid)
     else:
         raise ValueError(f"Annee non supportee pour les depenses dans cette passe: {annee}")
@@ -419,31 +420,51 @@ async def _charger_recettes(
 async def _charger_recettes_legifrance(
     db: AsyncSession, client: httpx.AsyncClient, annees: list[int]
 ) -> dict[int, float]:
-    """Telecharge, normalise et charge les recettes 2026+ (API Legifrance/PISTE).
+    """Telecharge, normalise et charge les recettes 2015/2021/2026 (API Legifrance/PISTE).
 
     Troisieme source de recettes (aux cotes de `_charger_recettes` -
     data.economie.gouv.fr 2024-2025 - et `_charger_recettes_cour_des_comptes`
     - Cour des comptes 2016-2020/2022-2023): le texte de la LFI elle-meme,
-    via l'API Legifrance (cf. `api.etl.sources`, section LFI 2026 du
-    docstring de module, et `_fetch_lfi_jorf`/`_extract_etats_html`
-    ci-dessus). Le meme appel `/consult/jorf` sert aussi aux depenses (cf.
-    `_fetch_depenses_annee`) - mutualise via `_lfi_jorf_cache`.
+    via l'API Legifrance (cf. `api.etl.sources`, docstring de module, et
+    `_fetch_lfi_jorf`/`_extract_etats_html` ci-dessus). Le meme appel
+    `/consult/jorf` sert aussi aux depenses (cf. `_fetch_depenses_annee`)
+    - mutualise via `_lfi_jorf_cache`.
 
-    Rattrapage brut/net (meme principe que `_charger_recettes_cour_des_
-    comptes`, mais SEULEMENT sur le programme "impots d'Etat" - PAS toute
-    la mission, cf. docstring de `loader.
-    get_remboursements_degrevements_impots_etat_cp` pour le detail du bug
-    reel trouve ici en confondant les deux au premier essai): les impots
-    "nets" d'Etat A ("Impot NET sur le revenu", etc.) sont deja nets des
-    remboursements et degrevements d'impots d'Etat (PAS des impots locaux,
-    qui ne sont jamais une recette d'Etat), alors que les depenses deja
-    chargees par le pipeline "depenses" (`upsert_depenses`) comptent le
-    programme "Remboursements et degrevements d'impots d'Etat" comme une
-    depense a part entiere (base BRUTE). Sans ce rattrapage, le deficit
-    calcule serait SURESTIME d'environ ce montant - constate a l'execution
-    reelle sur la LFI 2026: ~274,7 Md EUR de deficit calcule au lieu des
-    ~133,5 Md EUR officiels (tableau d'equilibre de l'article 147 de la
-    loi, "Solde" du budget general: -133 477 M EUR).
+    Rattrapage brut/net CIBLE (PAS le meme principe que `_charger_recettes_
+    cour_des_comptes`, qui regrossit TOUJOURS la mission entiere - source
+    differente, methodologie differente, cf. plus bas): applique
+    SEULEMENT aux annees listees dans `api.etl.sources.
+    LFI_REMBOURSEMENTS_IMPOTS_ETAT_SEUL` (2026 actuellement), et seulement
+    sur le programme "impots d'Etat" (PAS "impots locaux") de la mission
+    "Remboursements et degrevements" - cf. docstring de `loader.
+    get_remboursements_degrevements_impots_etat_cp` pour le detail complet
+    du bug trouve en construisant ce rattrapage.
+
+    Etabli empiriquement en comparant, POUR CHAQUE annee individuellement,
+    le deficit calcule au "Solde" officiel de son propre article
+    d'equilibre (celui qui precede immediatement Etat A dans le texte de
+    loi - article 147 pour 2026, 93 pour 2021, 49 pour 2015) plutot que de
+    supposer qu'une regle verifiee sur une annee se generalise:
+    - LFI 2026: les montants d'Etat A ("Impot NET sur le revenu", etc.)
+      sont dans une convention qui necessite d'ajouter le CP du programme
+      "impots d'Etat" aux recettes pour retomber sur le solde officiel
+      (-133,5 Md EUR) - sans ce rattrapage, deficit calcule ~274,7 Md EUR.
+    - LFI 2015 et 2021: AUCUN rattrapage necessaire - la somme brute des
+      lignes d'Etat A (hors PSR) correspond DEJA exactement a la ligne
+      "Recettes fiscales brutes + non fiscales" du tableau d'equilibre
+      officiel (verifie au euro pres pour les 2 annees), qui est ensuite
+      comparee a des depenses elles-memes BRUTES (la mission "Remboursements
+      et degrevements" s'annule mathematiquement des DEUX cotes de
+      l'equation quand aucun des deux n'est ajuste - c'est le cas different
+      de 2026, dont le tableau d'equilibre ne presente pas cette meme
+      symetrie brute/nette). Bug reel trouve en verifiant explicitement:
+      un premier essai reutilisant le rattrapage "mission entiere" (comme
+      pour la Cour des comptes) pour 2015 donnait un deficit de -13,6 Md
+      EUR (surplus implausible) au lieu du solde officiel -74,2 Md EUR;
+      un deuxieme essai reutilisant le rattrapage "impots d'Etat seul" de
+      2026 pour 2021 donnait 43,0 Md EUR au lieu du solde officiel exact
+      -172,4 Md EUR - dans les deux cas, seule la comparaison directe a
+      l'article d'equilibre officiel de CHAQUE annee a revele l'erreur.
 
     Retourne le mapping {annee: total PSR en EUROS}, comme `_charger_
     recettes`/`_charger_recettes_cour_des_comptes`.
@@ -454,23 +475,27 @@ async def _charger_recettes_legifrance(
         text_cid = sources.LFI_TEXT_CID_PAR_ANNEE[annee]
         jorf = await _fetch_lfi_jorf(client, text_cid)
         etat_a, _etat_b = _extract_etats_html(jorf)
+        unite_milliers = annee in sources.LFI_ETAT_A_MILLIERS_EUROS
 
-        records = normalize.normalize_recettes_legifrance_2026(etat_a, annee)
+        records = normalize.normalize_recettes_legifrance(
+            etat_a, annee, unite_milliers=unite_milliers
+        )
 
-        rd_cp = await loader.get_remboursements_degrevements_impots_etat_cp(db, annee)
-        if rd_cp:
-            records = [
-                *records,
-                normalize.RecetteRecord(annee=annee, type=TypeRecette.AUTRES, montant=rd_cp),
-            ]
-            logger.info(
-                "annee %d (Legifrance/PISTE): +%.1f Md EUR ajoutes a AUTRES (programme "
-                "'Remboursements et degrevements d'impots d'Etat' deja charge comme "
-                "depense - rattrapage brut/net, cf. loader."
-                "get_remboursements_degrevements_impots_etat_cp)",
-                annee,
-                rd_cp / 1e9,
-            )
+        if annee in sources.LFI_REMBOURSEMENTS_IMPOTS_ETAT_SEUL:
+            rd_cp = await loader.get_remboursements_degrevements_impots_etat_cp(db, annee)
+            if rd_cp:
+                records = [
+                    *records,
+                    normalize.RecetteRecord(annee=annee, type=TypeRecette.AUTRES, montant=rd_cp),
+                ]
+                logger.info(
+                    "annee %d (Legifrance/PISTE): +%.1f Md EUR ajoutes a AUTRES (programme "
+                    "'impots d'Etat' de 'Remboursements et degrevements' deja charge comme "
+                    "depense - rattrapage brut/net, cf. loader."
+                    "get_remboursements_degrevements_impots_etat_cp)",
+                    annee,
+                    rd_cp / 1e9,
+                )
 
         aggregats = normalize.aggregate_recettes(records)
         tous_les_aggregats.extend(aggregats)
@@ -481,7 +506,9 @@ async def _charger_recettes_legifrance(
             len(aggregats),
         )
 
-        psr = normalize.extract_prelevements_sur_recettes_legifrance(etat_a, annee)
+        psr = normalize.extract_prelevements_sur_recettes_legifrance(
+            etat_a, annee, unite_milliers=unite_milliers
+        )
         psr_par_annee[annee] = psr.total
         logger.info(
             "annee %d (Legifrance/PISTE): PSR exclus des recettes = %.1f Md EUR "
@@ -719,8 +746,8 @@ async def run_etl(
     ]
     for a in hors_perimetre:
         logger.warning(
-            "annee %d hors perimetre de cette passe d'ingestion (depenses: 2012-2014/"
-            "2016-2026, recettes: 2016-2020/2022-2026), ignoree",
+            "annee %d hors perimetre de cette passe d'ingestion (depenses: 2012-2026 "
+            "hors 2006-2010, recettes: 2015-2026), ignoree",
             a,
         )
 

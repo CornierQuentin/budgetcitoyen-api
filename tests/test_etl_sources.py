@@ -58,8 +58,10 @@ def test_default_depenses_source_url_annee_attachments_standard() -> None:
 
 
 def test_default_depenses_source_url_annee_hors_perimetre_retourne_none() -> None:
-    # 2015: trou reel documente, hors perimetre de toutes les sources connues.
-    assert sources.default_depenses_source_url(2015) is None
+    # 2008: trou reel documente (depenses 2006-2010), hors perimetre de
+    # toutes les sources connues - 2015 est desormais couvert (cf. tests
+    # ci-dessous), ce n'est plus un exemple valide de trou.
+    assert sources.default_depenses_source_url(2008) is None
 
 
 def test_legifrance_url_construit_l_url_publique_du_texte() -> None:
@@ -83,3 +85,27 @@ def test_2026_couvert_par_depenses_et_recettes_legifrance() -> None:
     # (double traitement non gere par `api.etl.run.run_etl`).
     assert 2026 not in sources.RECETTES_ANNEES
     assert 2026 not in sources.RECETTES_COUR_DES_COMPTES_ANNEES
+
+
+def test_2015_couvert_par_depenses_et_recettes_legifrance() -> None:
+    assert 2015 in sources.DEPENSES_ANNEES
+    assert 2015 in sources.RECETTES_LEGIFRANCE_ANNEES
+    assert 2015 not in sources.RECETTES_ANNEES
+    assert 2015 not in sources.RECETTES_COUR_DES_COMPTES_ANNEES
+    assert 2015 in sources.LFI_ETAT_A_MILLIERS_EUROS
+
+
+def test_2021_couvert_par_recettes_legifrance_pas_depenses() -> None:
+    # 2021 recettes viennent de Legifrance, mais ses depenses restent
+    # couvertes par la source attachment CSV existante (deja en place avant
+    # ce chantier) - LFI_TEXT_CID_PAR_ANNEE contient son textCid pour les
+    # recettes uniquement, sans que cela route ses depenses vers cette
+    # source (cf. l'ordre des branches dans `api.etl.run._fetch_depenses_
+    # annee`, teste dans test_etl_run.py).
+    assert 2021 in sources.RECETTES_LEGIFRANCE_ANNEES
+    assert 2021 in sources.LFI_TEXT_CID_PAR_ANNEE
+    assert 2021 not in sources.LFI_ETAT_A_MILLIERS_EUROS
+    url = sources.default_depenses_source_url(2021)
+    assert url is not None
+    assert sources.DEPENSES_ATTACHMENT_IDS[2021]["detaillee"] in url
+    assert "legifrance.gouv.fr" not in url
