@@ -1,16 +1,17 @@
 """CLI d'orchestration du pipeline ETL: telechargement -> normalisation -> chargement.
 
 Usage:
-    python -m api.etl.run [--annees 2012-2025]
+    python -m api.etl.run [--annees 2012-2026]
         [--depenses-only | --recettes-only | --indicateurs-only]
 
-Ingere les depenses de l'Etat (budget general) pour 2012-2014 et 2016-2025,
-les recettes du budget general pour 2016-2020/2022-2025 (deux sources
-cohabitent: le portail data.economie.gouv.fr pour 2024-2025, et les rapports
+Ingere les depenses de l'Etat (budget general) pour 2012-2014 et 2016-2026,
+les recettes du budget general pour 2016-2020/2022-2026 (trois sources
+cohabitent: le portail data.economie.gouv.fr pour 2024-2025, les rapports
 annuels "Le budget de l'Etat en <annee>" de la Cour des comptes pour
-2016-2020 et 2022-2023 - voir `_charger_recettes` et
-`_charger_recettes_cour_des_comptes` respectivement), et les indicateurs
-macro (PIB nominal, population - voir `_charger_indicateurs`). 2015 (cote
+2016-2020 et 2022-2023, et l'API Legifrance/PISTE pour 2026 - voir
+`_charger_recettes`, `_charger_recettes_cour_des_comptes` et
+`_charger_recettes_legifrance` respectivement), et les indicateurs macro
+(PIB nominal, population - voir `_charger_indicateurs`). 2015 (cote
 depenses) et 2021 (cote recettes) restent des trous reels, hors perimetre de
 cette passe d'ingestion (voir `api.etl.sources.
 RECETTES_COUR_DES_COMPTES_ZIP_URLS` pour le detail de 2021).
@@ -30,6 +31,7 @@ from typing import Any
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.core.config import get_settings
 from api.db.session import async_session_maker
 from api.etl import loader, normalize, sources
 from api.models.recette import TypeRecette
@@ -113,6 +115,135 @@ async def _fetch_attachment_text(
 
 
 # ---------------------------------------------------------------------------
+# API Legifrance (PISTE) - LFI 2026+, OAuth2 client_credentials
+# ---------------------------------------------------------------------------
+
+# Cache memoire (le temps du process): un meme texte JORF (une annee) peut
+# etre demande deux fois dans le meme run (une fois pour les depenses via
+# `_fetch_depenses_annee`, une fois pour les recettes via `_charger_recettes_
+# legifrance`) - evite un second aller-retour reseau identique.
+_lfi_jorf_cache: dict[str, dict[str, Any]] = {}
+
+
+async def _get_piste_token(client: httpx.AsyncClient) -> str:
+    """Obtient un token OAuth2 (grant client_credentials) aupres de PISTE."""
+    settings = get_settings()
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            response = await client.post(
+                settings.piste_oauth_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": settings.piste_client_id,
+                    "client_secret": settings.piste_client_secret,
+                    "scope": "openid",
+                },
+                timeout=_HTTP_TIMEOUT,
+            )
+            response.raise_for_status()
+            token: str = response.json()["access_token"]
+            return token
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            logger.warning(
+                "echec obtention token PISTE (tentative %d/%d): %s", attempt, _MAX_ATTEMPTS, exc
+            )
+            if attempt < _MAX_ATTEMPTS:
+                await asyncio.sleep(2 * attempt)
+    assert last_exc is not None
+    raise last_exc
+
+
+async def _fetch_lfi_jorf(client: httpx.AsyncClient, text_cid: str) -> dict[str, Any]:
+    """Recupere (avec cache memoire) le contenu structure d'un texte JORF via l'API
+    Legifrance (`POST /consult/jorf`), authentifie par un token OAuth PISTE
+    frais a chaque appel (pas de cache de token: sa duree de vie - de l'ordre
+    de l'heure - depasse largement celle d'un run ETL, mais un appel unique
+    par texte suffit et evite toute gestion d'expiration)."""
+    if text_cid in _lfi_jorf_cache:
+        return _lfi_jorf_cache[text_cid]
+    settings = get_settings()
+    token = await _get_piste_token(client)
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            response = await client.post(
+                f"{settings.piste_api_base_url}/consult/jorf",
+                json={"textCid": text_cid},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=_HTTP_TIMEOUT,
+            )
+            response.raise_for_status()
+            data: dict[str, Any] = response.json()
+            _lfi_jorf_cache[text_cid] = data
+            return data
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            logger.warning(
+                "echec requete /consult/jorf %s (tentative %d/%d): %s",
+                text_cid,
+                attempt,
+                _MAX_ATTEMPTS,
+                exc,
+            )
+            if attempt < _MAX_ATTEMPTS:
+                await asyncio.sleep(2 * attempt)
+    assert last_exc is not None
+    raise last_exc
+
+
+_MARQUEUR_ETATS_ANNEXES = "ÉTATS LÉGISLATIFS ANNEXÉS"
+
+
+def _walk_articles(node: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    """Parcourt recursivement `sections`/`articles` d'une reponse JORF (arborescence
+    de l'articulation legale du texte, pas un flux de donnees tabulaire)."""
+    yield from node.get("articles") or []
+    for section in node.get("sections") or []:
+        yield from _walk_articles(section)
+
+
+def _extract_etats_html(jorf_json: dict[str, Any]) -> tuple[str, str]:
+    """Isole les tables HTML "I. - Budget general" d'Etat A (recettes) et
+    Etat B (depenses) au sein de la reponse `/consult/jorf`.
+
+    Les etats legislatifs annexes (A a G) sont tous concatenes dans le
+    `content` HTML d'UN SEUL article sans numero, repere par la marque
+    textuelle "ETATS LEGISLATIFS ANNEXES" (pas par un id d'article fige, qui
+    pourrait changer en cas de texte rectificatif - verifie a l'inspection
+    reelle: cet article porte un id JORFARTI mais aucun "num"). "ETAT A"/
+    "ETAT B"/"ETAT C" marquent le debut de chaque etat.
+
+    Chacun de ces etats peut lui-meme contenir PLUSIEURS tables HTML
+    concatenees (Etat A: Budget general, puis Budgets annexes, Comptes
+    d'affectation speciale, Comptes de concours financiers - verifie: 5
+    tables distinctes; Etat B: une seule table, Budget general uniquement)
+    - seule la PREMIERE table de chaque etat est retenue (perimetre "Budget
+    general", coherent avec la convention BG-only deja en place pour
+    2016-2025, cf. `api.etl.sources`).
+    """
+    for article in _walk_articles(jorf_json):
+        content = article.get("content") or ""
+        if _MARQUEUR_ETATS_ANNEXES in content:
+            debut_a = content.index("ÉTAT A")
+            debut_b = content.index("ÉTAT B", debut_a)
+            debut_c = content.index("ÉTAT C", debut_b)
+            return (
+                _premiere_table_html(content[debut_a:debut_b]),
+                _premiere_table_html(content[debut_b:debut_c]),
+            )
+    raise ValueError("article des etats legislatifs annexes introuvable dans la reponse JORF")
+
+
+def _premiere_table_html(fragment: str) -> str:
+    """Extrait le premier `<table>...</table>` d'un fragment de contenu."""
+    debut = fragment.index("<table")
+    fin = fragment.index("</table>", debut) + len("</table>")
+    return fragment[debut:fin]
+
+
+# ---------------------------------------------------------------------------
 # Etape depenses
 # ---------------------------------------------------------------------------
 
@@ -183,6 +314,12 @@ async def _fetch_depenses_annee(
         text = await _fetch_attachment_text(client, dataset_id, attachment_id)
         records = normalize.normalize_depenses_attachment_detaillee(text, annee)
         source_url = sources.attachment_url(dataset_id, attachment_id)
+    elif annee in sources.LFI_TEXT_CID_PAR_ANNEE:
+        text_cid = sources.LFI_TEXT_CID_PAR_ANNEE[annee]
+        jorf = await _fetch_lfi_jorf(client, text_cid)
+        _etat_a, etat_b = _extract_etats_html(jorf)
+        records = normalize.normalize_depenses_2026(etat_b, annee)
+        source_url = sources.legifrance_url(text_cid)
     else:
         raise ValueError(f"Annee non supportee pour les depenses dans cette passe: {annee}")
 
@@ -270,6 +407,85 @@ async def _charger_recettes(
         # principe de sourcage systematique du projet.
         logger.info(
             "annee %d: PSR exclus des recettes = %.1f Md EUR (collectivites %.1f + UE %.1f)",
+            annee,
+            psr.total / 1e9,
+            psr.collectivites / 1e9,
+            psr.union_europeenne / 1e9,
+        )
+    await loader.upsert_recettes(db, tous_les_aggregats)
+    return psr_par_annee
+
+
+async def _charger_recettes_legifrance(
+    db: AsyncSession, client: httpx.AsyncClient, annees: list[int]
+) -> dict[int, float]:
+    """Telecharge, normalise et charge les recettes 2026+ (API Legifrance/PISTE).
+
+    Troisieme source de recettes (aux cotes de `_charger_recettes` -
+    data.economie.gouv.fr 2024-2025 - et `_charger_recettes_cour_des_comptes`
+    - Cour des comptes 2016-2020/2022-2023): le texte de la LFI elle-meme,
+    via l'API Legifrance (cf. `api.etl.sources`, section LFI 2026 du
+    docstring de module, et `_fetch_lfi_jorf`/`_extract_etats_html`
+    ci-dessus). Le meme appel `/consult/jorf` sert aussi aux depenses (cf.
+    `_fetch_depenses_annee`) - mutualise via `_lfi_jorf_cache`.
+
+    Rattrapage brut/net (meme principe que `_charger_recettes_cour_des_
+    comptes`, mais SEULEMENT sur le programme "impots d'Etat" - PAS toute
+    la mission, cf. docstring de `loader.
+    get_remboursements_degrevements_impots_etat_cp` pour le detail du bug
+    reel trouve ici en confondant les deux au premier essai): les impots
+    "nets" d'Etat A ("Impot NET sur le revenu", etc.) sont deja nets des
+    remboursements et degrevements d'impots d'Etat (PAS des impots locaux,
+    qui ne sont jamais une recette d'Etat), alors que les depenses deja
+    chargees par le pipeline "depenses" (`upsert_depenses`) comptent le
+    programme "Remboursements et degrevements d'impots d'Etat" comme une
+    depense a part entiere (base BRUTE). Sans ce rattrapage, le deficit
+    calcule serait SURESTIME d'environ ce montant - constate a l'execution
+    reelle sur la LFI 2026: ~274,7 Md EUR de deficit calcule au lieu des
+    ~133,5 Md EUR officiels (tableau d'equilibre de l'article 147 de la
+    loi, "Solde" du budget general: -133 477 M EUR).
+
+    Retourne le mapping {annee: total PSR en EUROS}, comme `_charger_
+    recettes`/`_charger_recettes_cour_des_comptes`.
+    """
+    tous_les_aggregats: list[normalize.RecetteAggregat] = []
+    psr_par_annee: dict[int, float] = {}
+    for annee in annees:
+        text_cid = sources.LFI_TEXT_CID_PAR_ANNEE[annee]
+        jorf = await _fetch_lfi_jorf(client, text_cid)
+        etat_a, _etat_b = _extract_etats_html(jorf)
+
+        records = normalize.normalize_recettes_legifrance_2026(etat_a, annee)
+
+        rd_cp = await loader.get_remboursements_degrevements_impots_etat_cp(db, annee)
+        if rd_cp:
+            records = [
+                *records,
+                normalize.RecetteRecord(annee=annee, type=TypeRecette.AUTRES, montant=rd_cp),
+            ]
+            logger.info(
+                "annee %d (Legifrance/PISTE): +%.1f Md EUR ajoutes a AUTRES (programme "
+                "'Remboursements et degrevements d'impots d'Etat' deja charge comme "
+                "depense - rattrapage brut/net, cf. loader."
+                "get_remboursements_degrevements_impots_etat_cp)",
+                annee,
+                rd_cp / 1e9,
+            )
+
+        aggregats = normalize.aggregate_recettes(records)
+        tous_les_aggregats.extend(aggregats)
+        logger.info(
+            "recettes %d (Legifrance/PISTE): %d lignes brutes -> %d types agreges " "(PSR exclus)",
+            annee,
+            len(records),
+            len(aggregats),
+        )
+
+        psr = normalize.extract_prelevements_sur_recettes_legifrance(etat_a, annee)
+        psr_par_annee[annee] = psr.total
+        logger.info(
+            "annee %d (Legifrance/PISTE): PSR exclus des recettes = %.1f Md EUR "
+            "(collectivites %.1f + UE %.1f)",
             annee,
             psr.total / 1e9,
             psr.collectivites / 1e9,
@@ -489,6 +705,9 @@ async def run_etl(
         if recettes
         else []
     )
+    recettes_annees_legifrance = (
+        [a for a in annees_list if a in sources.RECETTES_LEGIFRANCE_ANNEES] if recettes else []
+    )
 
     hors_perimetre = [
         a
@@ -496,20 +715,22 @@ async def run_etl(
         if a not in sources.DEPENSES_ANNEES
         and a not in sources.RECETTES_ANNEES
         and a not in sources.RECETTES_COUR_DES_COMPTES_ANNEES
+        and a not in sources.RECETTES_LEGIFRANCE_ANNEES
     ]
     for a in hors_perimetre:
         logger.warning(
             "annee %d hors perimetre de cette passe d'ingestion (depenses: 2012-2014/"
-            "2016-2025, recettes: 2016-2020/2022-2025), ignoree",
+            "2016-2026, recettes: 2016-2020/2022-2026), ignoree",
             a,
         )
 
     logger.info(
         "demarrage ETL: depenses=%s recettes(opendatasoft)=%s recettes(cour des comptes)=%s "
-        "indicateurs=%s",
+        "recettes(legifrance)=%s indicateurs=%s",
         depenses_annees or "aucune",
         recettes_annees or "aucune",
         recettes_annees_ccomptes or "aucune",
+        recettes_annees_legifrance or "aucune",
         indicateurs,
     )
 
@@ -533,6 +754,10 @@ async def run_etl(
             if recettes_annees_ccomptes:
                 psr_par_annee.update(
                     await _charger_recettes_cour_des_comptes(db, client, recettes_annees_ccomptes)
+                )
+            if recettes_annees_legifrance:
+                psr_par_annee.update(
+                    await _charger_recettes_legifrance(db, client, recettes_annees_legifrance)
                 )
             if indicateurs:
                 await _charger_indicateurs(db, client)
@@ -591,8 +816,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--annees",
-        default="2012-2025",
-        help="Plage/liste d'annees (ex: '2012-2025', '2024,2025'). Defaut: 2012-2025.",
+        default="2012-2026",
+        help="Plage/liste d'annees (ex: '2012-2026', '2024,2025'). Defaut: 2012-2026.",
     )
     groupe = parser.add_mutually_exclusive_group()
     groupe.add_argument("--depenses-only", action="store_true", help="Ne charger que les depenses.")

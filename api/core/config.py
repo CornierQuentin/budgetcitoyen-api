@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     data_economie_base_url: str = "https://www.data.economie.gouv.fr"
     data_gouv_base_url: str = "https://www.data.gouv.fr"
+    piste_client_id: str = ""
+    piste_client_secret: str = ""
+    piste_oauth_url: str = "https://oauth.piste.gouv.fr/api/oauth/token"
+    piste_api_base_url: str = "https://api.piste.gouv.fr/dila/legifrance/lf-engine-app"
     # NoDecode: empeche pydantic-settings de tenter un decodage JSON de la variable
     # d'environnement avant validation, afin de pouvoir parser un simple CSV.
     cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:5173"]

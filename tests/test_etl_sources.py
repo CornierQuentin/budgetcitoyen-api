@@ -60,3 +60,26 @@ def test_default_depenses_source_url_annee_attachments_standard() -> None:
 def test_default_depenses_source_url_annee_hors_perimetre_retourne_none() -> None:
     # 2015: trou reel documente, hors perimetre de toutes les sources connues.
     assert sources.default_depenses_source_url(2015) is None
+
+
+def test_legifrance_url_construit_l_url_publique_du_texte() -> None:
+    url = sources.legifrance_url("JORFTEXT000053508155")
+
+    assert url == "https://www.legifrance.gouv.fr/jorf/id/JORFTEXT000053508155"
+
+
+def test_default_depenses_source_url_annee_2026_legifrance() -> None:
+    # 2026: LFI via l'API Legifrance/PISTE, source_url = page publique
+    # Legifrance (pas l'endpoint API, protege par OAuth).
+    url = sources.default_depenses_source_url(2026)
+
+    assert url == sources.legifrance_url(sources.LFI_TEXT_CID_PAR_ANNEE[2026])
+
+
+def test_2026_couvert_par_depenses_et_recettes_legifrance() -> None:
+    assert 2026 in sources.DEPENSES_ANNEES
+    assert 2026 in sources.RECETTES_LEGIFRANCE_ANNEES
+    # 2026 ne doit apparaitre dans AUCUNE des 2 autres listes de recettes
+    # (double traitement non gere par `api.etl.run.run_etl`).
+    assert 2026 not in sources.RECETTES_ANNEES
+    assert 2026 not in sources.RECETTES_COUR_DES_COMPTES_ANNEES
