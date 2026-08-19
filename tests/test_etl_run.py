@@ -21,8 +21,10 @@ pour couvrir la logique de dispatch elle-meme.
 from __future__ import annotations
 
 import asyncio
+import json
 import zipfile
 from io import BytesIO
+from pathlib import Path
 
 import httpx
 import pytest
@@ -230,6 +232,122 @@ async def test_fetch_zip_member_extrait_et_decode_le_bon_membre(
 
 
 # ---------------------------------------------------------------------------
+# API Legifrance (PISTE): _get_piste_token / _fetch_lfi_jorf / _extract_etats_html
+# ---------------------------------------------------------------------------
+
+
+class _FakeSettings:
+    piste_oauth_url = "https://oauth.test/token"
+    piste_client_id = "id-test"
+    piste_client_secret = "secret-test"
+    piste_api_base_url = "https://api.test/legifrance"
+
+
+async def test_get_piste_token_reussit_du_premier_coup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run, "get_settings", lambda: _FakeSettings())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == _FakeSettings.piste_oauth_url
+        return httpx.Response(200, json={"access_token": "tok-123"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        token = await run._get_piste_token(client)
+
+    assert token == "tok-123"
+
+
+async def test_get_piste_token_reessaie_puis_reussit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(run, "get_settings", lambda: _FakeSettings())
+    appels = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        appels["n"] += 1
+        if appels["n"] < 3:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"access_token": "tok-abc"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        token = await run._get_piste_token(client)
+
+    assert token == "tok-abc"
+    assert appels["n"] == 3
+
+
+async def test_get_piste_token_echoue_apres_le_max_de_tentatives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(run, "get_settings", lambda: _FakeSettings())
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await run._get_piste_token(client)
+
+
+async def test_fetch_lfi_jorf_met_en_cache_par_text_cid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Un meme textCid demande deux fois (ex depenses puis recettes du meme
+    run) ne doit declencher qu'un seul aller-retour reseau (token + jorf).
+    """
+    run._lfi_jorf_cache.clear()
+    monkeypatch.setattr(run, "get_settings", lambda: _FakeSettings())
+
+    appels_token = {"n": 0}
+
+    async def _fake_get_piste_token(_client: httpx.AsyncClient) -> str:
+        appels_token["n"] += 1
+        return "tok"
+
+    monkeypatch.setattr(run, "_get_piste_token", _fake_get_piste_token)
+
+    appels_jorf = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        appels_jorf["n"] += 1
+        return httpx.Response(200, json={"title": "ok"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        data1 = await run._fetch_lfi_jorf(client, "JORFTEXT000TEST")
+        data2 = await run._fetch_lfi_jorf(client, "JORFTEXT000TEST")
+
+    assert data1 == {"title": "ok"}
+    assert data2 == {"title": "ok"}
+    assert appels_jorf["n"] == 1
+    assert appels_token["n"] == 1
+
+
+def _load_jorf_etats_annexes_sample() -> dict:
+    path = Path(__file__).parent / "fixtures" / "lfi2026_jorf_etats_annexes_sample.json"
+    data: dict = json.loads(path.read_text(encoding="utf-8"))
+    return data
+
+
+def test_extract_etats_html_isole_la_premiere_table_de_chaque_etat() -> None:
+    """La fixture imite la structure reelle: l'article marque "ETATS
+    LEGISLATIFS ANNEXES" est niche a 2 niveaux de `sections` (le parcours
+    recursif doit le trouver), et Etat A y contient 2 tables concatenees
+    (Budget general + Budgets annexes) - seule la 1ere doit etre retenue.
+    """
+    jorf = _load_jorf_etats_annexes_sample()
+    etat_a, etat_b = run._extract_etats_html(jorf)
+
+    assert etat_a.count("<table") == 1
+    assert "1101" in etat_a
+    assert "Contrôle et exploitation aériens" not in etat_a
+
+    assert etat_b.count("<table") == 1
+    assert "Action extérieure de l'Etat" in etat_b
+
+
+def test_extract_etats_html_leve_si_marqueur_absent() -> None:
+    with pytest.raises(ValueError, match="etats legislatifs annexes"):
+        run._extract_etats_html({"articles": [], "sections": []})
+
+
+# ---------------------------------------------------------------------------
 # _fetch_depenses_annee: dispatch par annee
 # ---------------------------------------------------------------------------
 
@@ -337,6 +455,25 @@ async def test_fetch_depenses_annee_2021_2022_branche_partagee(
     assert records_2022 is sentinel
 
 
+async def test_fetch_depenses_annee_2026_cas_legifrance(monkeypatch: pytest.MonkeyPatch) -> None:
+    sentinel = [object()]
+    text_cid = sources.LFI_TEXT_CID_PAR_ANNEE[2026]
+
+    async def _fake_fetch_lfi_jorf(_client: httpx.AsyncClient, cid: str) -> dict:
+        assert cid == text_cid
+        return {"fake": "jorf"}
+
+    monkeypatch.setattr(run, "_fetch_lfi_jorf", _fake_fetch_lfi_jorf)
+    monkeypatch.setattr(run, "_extract_etats_html", lambda jorf: ("etat-a", "etat-b"))
+    monkeypatch.setattr(normalize, "normalize_depenses_2026", lambda etat_b, a: sentinel)
+
+    async with httpx.AsyncClient() as client:
+        records, source_url = await run._fetch_depenses_annee(client, 2026)
+
+    assert records is sentinel
+    assert source_url == sources.legifrance_url(text_cid)
+
+
 async def test_fetch_depenses_annee_leve_pour_une_annee_hors_perimetre() -> None:
     async with httpx.AsyncClient() as client:
         with pytest.raises(ValueError, match="2015"):
@@ -409,6 +546,120 @@ async def test_charger_recettes_enchaine_fetch_normalize_et_load(
         )
     ).scalar_one()
     assert recette.montant_net == 100.0
+
+
+async def test_charger_recettes_legifrance_enchaine_fetch_normalize_et_load(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    annee = 2026
+    recette_records = [normalize.RecetteRecord(annee=annee, type=TypeRecette.TICPE, montant=100.0)]
+    psr = normalize.PrelevementsSurRecettes(annee=annee, collectivites=5.0, union_europeenne=2.0)
+
+    async def _fake_fetch_lfi_jorf(_client: httpx.AsyncClient, _text_cid: str) -> dict:
+        return {"fake": "jorf"}
+
+    monkeypatch.setattr(run, "_fetch_lfi_jorf", _fake_fetch_lfi_jorf)
+    monkeypatch.setattr(run, "_extract_etats_html", lambda jorf: ("etat-a", "etat-b"))
+    monkeypatch.setattr(
+        normalize, "normalize_recettes_legifrance_2026", lambda etat_a, a: recette_records
+    )
+    monkeypatch.setattr(
+        normalize, "extract_prelevements_sur_recettes_legifrance", lambda etat_a, a: psr
+    )
+
+    async with httpx.AsyncClient() as client:
+        psr_par_annee = await run._charger_recettes_legifrance(db_session, client, [annee])
+    await db_session.commit()
+
+    assert psr_par_annee == {annee: 7.0}
+    recette = (
+        await db_session.execute(
+            select(Recette).where(Recette.annee == annee, Recette.type == TypeRecette.TICPE)
+        )
+    ).scalar_one()
+    assert recette.montant_net == 100.0
+
+
+async def test_charger_recettes_legifrance_regrossit_avec_remboursements_et_degrevements(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bug reel trouve et corrige a l'execution du run complet sur la LFI 2026:
+    sans ce rattrapage, le deficit calcule ressortait a ~274,7 Md EUR au
+    lieu des ~133,5 Md EUR officiels (tableau d'equilibre, article 147).
+    Un premier correctif (regrossir toute la mission, comme pour `_charger_
+    recettes_cour_des_comptes`) etait encore FAUX de ~4,4 Md EUR: seul le
+    programme "impots d'Etat" doit etre regrossi, pas "impots locaux" (cf.
+    docstring de `loader.get_remboursements_degrevements_impots_etat_cp`) -
+    ce test seede donc les 2 programmes et verifie que seul le premier
+    contribue.
+    """
+    annee = 2026
+    mapping = await loader.upsert_missions(
+        db_session,
+        [
+            normalize.MissionYearRow(
+                slug="remboursements-et-degrevements",
+                nom_normalise="remboursements et degrevements",
+                nom_officiel="Remboursements et degrevements",
+                annee=annee,
+                code_mission=None,
+            )
+        ],
+    )
+    await db_session.commit()
+    mission_id = mapping[("remboursements-et-degrevements", annee)]
+    rd_etat = normalize.DepenseAggregat(
+        annee=annee,
+        mission_code="",
+        mission_libelle="Remboursements et degrevements",
+        programme_code="hash-etat",
+        programme_libelle="Remboursements et dégrèvements d'impôts d'Etat",
+        action_code="hash-etat",
+        action_libelle="Remboursements et dégrèvements d'impôts d'Etat",
+        ae=141174362742.0,
+        cp=141174362742.0,
+    )
+    rd_locaux = normalize.DepenseAggregat(
+        annee=annee,
+        mission_code="",
+        mission_libelle="Remboursements et degrevements",
+        programme_code="hash-locaux",
+        programme_libelle="Remboursements et dégrèvements d'impôts locaux",
+        action_code="hash-locaux",
+        action_libelle="Remboursements et dégrèvements d'impôts locaux",
+        ae=4426000000.0,
+        cp=4426000000.0,
+    )
+    await loader.upsert_depenses(
+        db_session, annee, [(rd_etat, mission_id), (rd_locaux, mission_id)]
+    )
+    await db_session.commit()
+
+    recette_records = [normalize.RecetteRecord(annee=annee, type=TypeRecette.IR, montant=100.0)]
+    psr = normalize.PrelevementsSurRecettes(annee=annee, collectivites=0.0, union_europeenne=0.0)
+
+    async def _fake_fetch_lfi_jorf(_client: httpx.AsyncClient, _text_cid: str) -> dict:
+        return {"fake": "jorf"}
+
+    monkeypatch.setattr(run, "_fetch_lfi_jorf", _fake_fetch_lfi_jorf)
+    monkeypatch.setattr(run, "_extract_etats_html", lambda jorf: ("etat-a", "etat-b"))
+    monkeypatch.setattr(
+        normalize, "normalize_recettes_legifrance_2026", lambda etat_a, a: recette_records
+    )
+    monkeypatch.setattr(
+        normalize, "extract_prelevements_sur_recettes_legifrance", lambda etat_a, a: psr
+    )
+
+    async with httpx.AsyncClient() as client:
+        await run._charger_recettes_legifrance(db_session, client, [annee])
+    await db_session.commit()
+
+    autres = (
+        await db_session.execute(
+            select(Recette).where(Recette.annee == annee, Recette.type == TypeRecette.AUTRES)
+        )
+    ).scalar_one()
+    assert autres.montant_net == pytest.approx(141174362742.0)
 
 
 async def test_charger_recettes_cour_des_comptes_avec_tableau_equilibre(
@@ -554,12 +805,17 @@ def _patch_chargeurs(monkeypatch: pytest.MonkeyPatch, appels: list[str]) -> None
         appels.append("recettes_ccomptes")
         return {}
 
+    async def _fake_charger_recettes_legifrance(db, client, annees):
+        appels.append("recettes_legifrance")
+        return {}
+
     async def _fake_charger_indicateurs(db, client):
         appels.append("indicateurs")
 
     monkeypatch.setattr(run, "_charger_depenses", _fake_charger_depenses)
     monkeypatch.setattr(run, "_charger_recettes", _fake_charger_recettes)
     monkeypatch.setattr(run, "_charger_recettes_cour_des_comptes", _fake_charger_recettes_ccomptes)
+    monkeypatch.setattr(run, "_charger_recettes_legifrance", _fake_charger_recettes_legifrance)
     monkeypatch.setattr(run, "_charger_indicateurs", _fake_charger_indicateurs)
 
 
@@ -608,6 +864,25 @@ async def test_run_etl_route_les_recettes_cour_des_comptes(
     await run.run_etl([annee], depenses=True, recettes=True, indicateurs=False)
 
     assert appels == ["depenses", "recettes_ccomptes"]
+
+
+async def test_run_etl_route_les_recettes_legifrance(
+    monkeypatch: pytest.MonkeyPatch, db_engine: AsyncEngine
+) -> None:
+    # `db_engine` : voir le commentaire de test_run_etl_appelle_toutes_les_etapes_demandees.
+    appels: list[str] = []
+    _patch_chargeurs(monkeypatch, appels)
+    monkeypatch.setattr(run.loader, "recalculer_annee_budget", lambda *a, **k: _none_coro())
+
+    # 2026 : couvert par les depenses ET par Legifrance/PISTE
+    # (`RECETTES_LEGIFRANCE_ANNEES`), pas par OpenDataSoft ni la Cour des comptes.
+    annee = 2026
+    assert annee in sources.RECETTES_LEGIFRANCE_ANNEES
+    assert annee not in sources.RECETTES_ANNEES
+    assert annee not in sources.RECETTES_COUR_DES_COMPTES_ANNEES
+    await run.run_etl([annee], depenses=True, recettes=True, indicateurs=False)
+
+    assert appels == ["depenses", "recettes_legifrance"]
 
 
 async def test_run_etl_indicateurs_only_ne_touche_pas_annee_budget(
@@ -675,9 +950,9 @@ def test_main_annees_par_defaut_et_toutes_etapes_actives(monkeypatch: pytest.Mon
 
     run.main([])
 
-    assert captured["annees"] == run._parse_annees("2012-2025")
+    assert captured["annees"] == run._parse_annees("2012-2026")
     assert captured == {
-        "annees": run._parse_annees("2012-2025"),
+        "annees": run._parse_annees("2012-2026"),
         "depenses": True,
         "recettes": True,
         "indicateurs": True,

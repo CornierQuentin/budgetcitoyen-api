@@ -18,6 +18,7 @@ from api.etl.normalize import (
     clean_montant,
     extract_non_fiscal_et_psr_cour_des_comptes,
     extract_prelevements_sur_recettes,
+    extract_prelevements_sur_recettes_legifrance,
     normalize_depenses_2012,
     normalize_depenses_2013,
     normalize_depenses_2014,
@@ -25,6 +26,7 @@ from api.etl.normalize import (
     normalize_depenses_2017,
     normalize_depenses_2018,
     normalize_depenses_2020,
+    normalize_depenses_2026,
     normalize_depenses_attachment_detaillee,
     normalize_depenses_records_json,
     normalize_mission_name,
@@ -32,6 +34,7 @@ from api.etl.normalize import (
     normalize_pib_csv,
     normalize_population_xlsx,
     normalize_recettes_cour_des_comptes,
+    normalize_recettes_legifrance_2026,
     normalize_recettes_records_json,
     resolve_mission_identities,
 )
@@ -55,6 +58,10 @@ def _load_csv_utf8(name: str) -> str:
 
 def _load_bytes(name: str) -> bytes:
     return (FIXTURES / name).read_bytes()
+
+
+def _load_html(name: str) -> str:
+    return (FIXTURES / name).read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -855,3 +862,161 @@ def test_normalize_population_xlsx_lit_l_onglet_fr() -> None:
         2021: 67697091,
         2022: 68060207,
     }
+
+
+# ---------------------------------------------------------------------------
+# LFI 2026+ (API Legifrance/PISTE): Etat B (depenses), Etat A (recettes)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_depenses_2026_mission_programme_par_align() -> None:
+    """`align` distingue Mission (center) de Programme (left): la fixture
+    contient 2 missions, 6 lignes Programme (dont 3 "Dont titre 2" exclues).
+    """
+    etat_b_html = _load_html("lfi2026_etat_b_sample.html")
+    records = normalize_depenses_2026(etat_b_html, annee=2026)
+
+    assert len(records) == 6
+    assert all(r.annee == 2026 for r in records)
+    # Pas de code mission ni de code programme dans cette source: repli sur
+    # le slug (mission_code vide) et sur le libelle programme prefixe par la
+    # mission (programme_code), cf. docstring de la fonction.
+    assert all(r.mission_code == "" for r in records)
+    assert {r.mission_libelle for r in records} == {
+        "Action extérieure de l'Etat",
+        "Administration générale et territoriale de l'Etat",
+    }
+
+
+def test_normalize_depenses_2026_exclut_dont_titre_2_et_total() -> None:
+    """"Dont titre 2" (memo deja inclus dans le total programme) et "Total"
+    (cross-check uniquement) ne doivent jamais apparaitre comme lignes de
+    depense - sous peine de doubler les montants.
+    """
+    etat_b_html = _load_html("lfi2026_etat_b_sample.html")
+    records = normalize_depenses_2026(etat_b_html, annee=2026)
+
+    assert all(r.programme_libelle not in ("Dont titre 2", "Total") for r in records)
+
+    aggregats = aggregate_depenses(records)
+    # Le total AE/CP somme (hors "Dont titre 2"/"Total") doit retomber
+    # exactement sur la ligne "Total" de la fixture (8 445 629 452 / 8 535
+    # 968 788), verifie a la main sur les 2 missions/5 programmes de la
+    # fixture.
+    assert sum(a.ae for a in aggregats) == pytest.approx(8445629452.0)
+    assert sum(a.cp for a in aggregats) == pytest.approx(8535968788.0)
+
+
+def test_normalize_depenses_2026_action_synthetique_et_programme_code_hash() -> None:
+    """Aucune decomposition par action dans cette source: une action
+    synthetique unique est creee par programme (memes libelle/code que le
+    programme). `programme_code` est un hash court (<=16 caracteres, tient
+    dans `programme.code`/`action.code`, limites a 50 caracteres en base -
+    une simple concatenation de libelles la depasserait, cf. docstring de
+    la fonction) du couple (mission, programme), deterministe et stable
+    d'un appel a l'autre, pour eviter qu'un meme libelle de programme dans
+    2 missions differentes ne fusionne a tort dans `aggregate_depenses`
+    (cle mission_code/programme_code/action_code, ici mission_code vide
+    pour toutes les lignes).
+    """
+    etat_b_html = _load_html("lfi2026_etat_b_sample.html")
+    records = normalize_depenses_2026(etat_b_html, annee=2026)
+
+    codes = [r.programme_code for r in records]
+    assert len(codes) == len(set(codes))  # tous distincts
+    for r in records:
+        assert len(r.programme_code) <= 50
+        assert r.action_code == r.programme_code
+        assert r.action_libelle == r.programme_libelle
+
+    # Determinisme: reparser la meme fixture doit produire les memes codes.
+    records_bis = normalize_depenses_2026(etat_b_html, annee=2026)
+    assert [r.programme_code for r in records_bis] == codes
+
+    aggregats = aggregate_depenses(records)
+    # 6 programmes distincts dans la fixture -> 6 aggregats (une seule
+    # action par programme, aucune fusion).
+    assert len(aggregats) == 6
+
+
+def test_normalize_recettes_legifrance_2026_mappe_accises_vers_ticpe() -> None:
+    """La reforme fiscale 2026 eclate l'ancienne ligne TICPE (code 1501) en 4
+    codes (1501 ex-TICPE, 1502 ex-TICGN, 1503 ex-TICFE, 1504 "Autres taxes
+    interieures") - les 4 sont regroupes dans le bucket TICPE (decision
+    validee avec l'utilisateur, cf. `api.etl.sources.
+    CODE_LIGNE_RECETTE_VERS_TYPE`).
+    """
+    etat_a_html = _load_html("lfi2026_etat_a_sample.html")
+    records = normalize_recettes_legifrance_2026(etat_a_html, annee=2026)
+
+    ticpe_total = sum(r.montant for r in records if r.type == TypeRecette.TICPE)
+    assert ticpe_total == pytest.approx(17469533401.0 + 2226300000.0 + 5585300000.0 + 9000000.0)
+    assert ticpe_total == pytest.approx(25290133401.0)
+
+
+def test_normalize_recettes_legifrance_2026_ignore_les_lignes_de_categorie() -> None:
+    """Les lignes de categorie parentes (ex "1. Recettes fiscales", "11. Impot
+    net sur le revenu" - qui dupliquent le montant de leur unique ligne
+    numerotee "1101") ne doivent JAMAIS etre sommees en plus de leur(s)
+    ligne(s) de detail, sous peine de compter deux fois.
+    """
+    etat_a_html = _load_html("lfi2026_etat_a_sample.html")
+    records = normalize_recettes_legifrance_2026(etat_a_html, annee=2026)
+
+    ir_total = sum(r.montant for r in records if r.type == TypeRecette.IR)
+    # Une seule ligne IR (code 1101) dans la fixture: si la ligne de
+    # categorie "11." avait ete comptee en plus, le total serait double.
+    assert ir_total == pytest.approx(99836208951.0)
+
+
+def test_normalize_recettes_legifrance_2026_categorie_sans_enfant_est_une_feuille() -> None:
+    """Cas reel observe sur la LFI 2026: la categorie "18. Autres remboursements
+    et degrevements d'impots d'Etat" n'a AUCUNE ligne numerotee en dessous
+    (contrairement a "11."-"17." qui en ont chacune au moins une) - son
+    propre montant doit alors etre utilise comme une ligne de detail (pas
+    ignore comme une categorie ordinaire), et tombe dans AUTRES faute de
+    code_ligne_recettes associe.
+    """
+    etat_a_html = _load_html("lfi2026_etat_a_sample.html")
+    records = normalize_recettes_legifrance_2026(etat_a_html, annee=2026)
+
+    autres_total = sum(r.montant for r in records if r.type == TypeRecette.AUTRES)
+    # 2110 (1 257 454 531) + la categorie-feuille "18." (-10 461 709 884).
+    assert autres_total == pytest.approx(1257454531.0 - 10461709884.0)
+
+
+def test_normalize_recettes_legifrance_2026_exclut_les_lignes_psr() -> None:
+    """Les lignes PSR (categorie "3.", codes 31xx/32xx) ne doivent jamais
+    apparaitre dans `RecetteRecord` - traitees a part par
+    `extract_prelevements_sur_recettes_legifrance`.
+    """
+    etat_a_html = _load_html("lfi2026_etat_a_sample.html")
+    records = normalize_recettes_legifrance_2026(etat_a_html, annee=2026)
+
+    # 1101, 1301, 1501-1504, 1601, categorie-feuille 18, 2110 = 9 lignes;
+    # aucune des 4 lignes PSR (31/3101/3106/32/3201... en realite 2 lignes
+    # de detail: 3101, 3106, 3201) ne doit apparaitre.
+    assert len(records) == 9
+
+
+def test_extract_prelevements_sur_recettes_legifrance_isole_collectivites_et_ue() -> None:
+    etat_a_html = _load_html("lfi2026_etat_a_sample.html")
+    psr = extract_prelevements_sur_recettes_legifrance(etat_a_html, annee=2026)
+
+    assert psr.collectivites == pytest.approx(27405973591.0 + 17418111813.0)
+    assert psr.union_europeenne == pytest.approx(28439880549.0)
+    assert psr.total == pytest.approx(psr.collectivites + psr.union_europeenne)
+
+
+def test_normalize_recettes_legifrance_2026_recettes_nettes_coherentes() -> None:
+    """Verification forte de bout en bout: recettes (hors PSR) - PSR doit
+    retomber exactement sur "Total des recettes, nettes des prelevements"
+    de la fixture (204 092 159 647), calcule a la main a partir des memes
+    lignes.
+    """
+    etat_a_html = _load_html("lfi2026_etat_a_sample.html")
+    records = normalize_recettes_legifrance_2026(etat_a_html, annee=2026)
+    psr = extract_prelevements_sur_recettes_legifrance(etat_a_html, annee=2026)
+
+    recettes_nettes = sum(r.montant for r in records) - psr.total
+    assert recettes_nettes == pytest.approx(204092159647.0)

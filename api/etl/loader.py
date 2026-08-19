@@ -271,6 +271,53 @@ async def get_remboursements_degrevements_cp(db: AsyncSession, annee: int) -> fl
     return float(total or 0.0)
 
 
+async def get_remboursements_degrevements_impots_etat_cp(db: AsyncSession, annee: int) -> float:
+    """Retourne le CP du SEUL programme "Remboursements et degrevements d'impots
+    d'Etat" (PAS "...d'impots locaux", cf. ci-dessous) de la mission
+    "Remboursements et degrevements".
+
+    A la difference de `get_remboursements_degrevements_cp` (qui somme la
+    mission ENTIERE, les deux programmes "impots d'Etat" et "impots
+    locaux" - correct pour regrossir les recettes fiscales de la Cour des
+    comptes, dont le "tableau d'equilibre" nette explicitement les DEUX),
+    la source Legifrance/PISTE (LFI 2026+, Etat A) ne nette QUE les
+    remboursements/degrevements d'impots d'ETAT dans ses propres montants
+    "nets" (ex "Impot net sur le revenu") - les remboursements d'impots
+    LOCAUX (taxe fonciere, CFE...) ne sont jamais deduits d'une recette
+    d'Etat (ce ne sont pas des recettes d'Etat), et restent donc une
+    depense budget general reelle a part entiere, PAS a regrossir.
+
+    Bug reel trouve et corrige a l'execution du run complet sur la LFI
+    2026: en reutilisant `get_remboursements_degrevements_cp` (mission
+    entiere) par erreur, le deficit calcule ressortait a ~129,1 Md EUR
+    (sous-estime d'environ le CP du programme "impots locaux", ~4,4 Md
+    EUR) au lieu des ~133,5 Md EUR officiels (tableau d'equilibre, article
+    147 de la loi).
+
+    Cette annee-la (2026), aucun code n'est disponible ni pour la mission
+    (`code_mission=""`, cf. `api.etl.normalize.normalize_depenses_2026`) ni
+    pour les programmes (`programme.code` est un hash, non lisible) -
+    recherche donc par SLUG de mission et par LIBELLE de programme (motif
+    "impots d'Etat", ne doit PAS matcher "impots locaux"). Retourne 0.0 si
+    aucune ligne ne correspond (ex: libelle du programme different d'une
+    annee a l'autre - a revalider si ce cas se presente, meme logique de
+    repli silencieux que `get_remboursements_degrevements_cp`).
+    """
+    total = await db.scalar(
+        select(func.coalesce(func.sum(Depense.cp), 0))
+        .select_from(Depense)
+        .join(Action, Depense.action_id == Action.id)
+        .join(Programme, Action.programme_id == Programme.id)
+        .join(Mission, Programme.mission_id == Mission.id)
+        .where(
+            Mission.slug == "remboursements-et-degrevements",
+            Mission.annee == annee,
+            Programme.nom.ilike("%imp%ts d'Etat%"),
+        )
+    )
+    return float(total or 0.0)
+
+
 async def recalculer_annee_budget(
     db: AsyncSession,
     annee: int,

@@ -37,6 +37,7 @@ d'annees (annee_debut/annee_fin) ou elle a ete utilisee telle quelle.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import logging
 import re
@@ -187,6 +188,44 @@ def clean_montant(raw: float | int | str | None) -> float:
         text = text.replace(sep, "")
     text = text.replace(",", ".")
     return float(text)
+
+
+# ---------------------------------------------------------------------------
+# Parsing HTML minimal (source Legifrance/PISTE, Etats A/B de la LFI 2026)
+# ---------------------------------------------------------------------------
+
+_TR_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.DOTALL)
+_TD_RE = re.compile(r'<td(?:\s+align="([^"]*)")?[^>]*>(.*?)</td>', re.DOTALL)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _cell_text(raw_html: str) -> str:
+    """Extrait le texte d'une cellule `<td>`: retire les balises HTML, espaces normalises."""
+    return _TAG_RE.sub(" ", raw_html).strip()
+
+
+def parse_html_table_rows(html: str) -> list[list[tuple[str, str]]]:
+    """Extrait les lignes d'un tableau HTML simple en (align, texte) par cellule.
+
+    Parseur regex minimal, volontairement sans dependance HTML (BeautifulSoup
+    etc.): les tableaux Etat A/Etat B de la reponse API Legifrance sont
+    verifies structurellement simples (`<tr><td align="...">...</td></tr>`,
+    aucun `rowspan`/`colspan`/tableau imbrique observe) - cf. `api.etl.
+    sources` (docstring de module, section LFI 2026) pour le detail de la
+    structure et des regles de classification des lignes par etat.
+
+    `align` vaut "" quand l'attribut est absent de la cellule (observe pour
+    les cellules "numero de ligne" vides des lignes de categorie d'Etat A).
+    """
+    rows: list[list[tuple[str, str]]] = []
+    for tr_match in _TR_RE.finditer(html):
+        cells = [
+            (align or "", _cell_text(cell_html))
+            for align, cell_html in _TD_RE.findall(tr_match.group(1))
+        ]
+        if cells:
+            rows.append(cells)
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -968,6 +1007,81 @@ def normalize_depenses_attachment_detaillee(csv_text: str, annee: int) -> list[D
     return out
 
 
+def normalize_depenses_2026(etat_b_html: str, annee: int = 2026) -> list[DepenseRecord]:
+    """Normalise l'Etat B (repartition par mission et programme des credits du
+    budget general) de la LFI 2026 (et, potentiellement, des annees
+    suivantes au meme format) en `DepenseRecord`.
+
+    `etat_b_html` est le fragment HTML de la table "I." (deja isole par
+    `api.etl.run._extract_etats_html` - Etat B ne contient qu'une seule
+    table dans cette generation de source, contrairement a Etat A qui en
+    contient plusieurs concatenees, cf. `api.etl.sources`).
+
+    Mission et Programme sont distingues par l'attribut `align` de la
+    premiere cellule de chaque ligne (`center` = Mission, `left` =
+    Programme/"Dont titre 2"/"Total") - verifie exhaustivement sur les 213
+    lignes de la LFI 2026 (32 missions, 131 programmes, 49 lignes "Dont
+    titre 2", 1 ligne "Total"). "Dont titre 2" est un memo deja inclus dans
+    le total du programme (exclu de toute somme, sous peine de doubler ce
+    montant). La ligne finale "Total" sert uniquement de cross-check
+    externe (voir tests), jamais integree au parsing.
+
+    Contrairement a TOUTES les generations de source precedentes (y compris
+    2016/2017, qui n'ont pas de code mission mais ont un vrai code
+    programme et un vrai libelle/code action), Etat B ne fournit NI code
+    mission NI code programme NI decomposition par action: seulement des
+    libelles Mission/Programme. `mission_code=""` (repli sur le slug du
+    libelle, cf. `resolve_mission_identities`, meme mecanisme que 2013/2014/
+    2016/2017). `programme_code` est un hash court (16 caracteres hex) du
+    couple `(mission_libelle, programme_libelle)`, plutot que le seul
+    libelle programme: bien qu'aucune collision de libelle ne soit observee
+    sur la LFI 2026 (131 libelles programme, tous uniques), rien ne
+    garantit l'unicite d'un libelle de programme A TRAVERS plusieurs
+    missions pour une annee future - sans en tenir compte,
+    `aggregate_depenses` (cle `(mission_code, programme_code, action_code)`,
+    ici `mission_code` vide pour toutes les lignes) fusionnerait
+    silencieusement deux programmes homonymes de missions differentes. Un
+    hash (plutot qu'une simple concatenation des libelles) est necessaire
+    car `programme.code`/`action.code` sont limites a 50 caracteres en base
+    - la concatenation de libelles longs (mission + programme, plus de 100
+    caracteres pour plusieurs lignes reelles de la LFI 2026) depasserait
+    cette limite: bug reel trouve et corrige a l'execution du run complet
+    contre la base (`StringDataRightTruncationError`), pas en test unitaire
+    seul (les fixtures de test n'exercaient que des libelles courts). Une
+    action SYNTHETIQUE unique est creee par programme (`action_code`/`
+    action_libelle` reprennent ceux du programme): limitation reelle de
+    cette source (aucune granularite plus fine disponible, a la difference
+    de toutes les autres annees), documentee plutot que masquee.
+    """
+    rows = parse_html_table_rows(etat_b_html)
+    out: list[DepenseRecord] = []
+    mission_libelle = ""
+    for row in rows:
+        align, label = row[0]
+        ae_str, cp_str = row[1][1], row[2][1]
+        if align == "center":
+            mission_libelle = label
+            continue
+        if label in ("Dont titre 2", "Total"):
+            continue
+        cle = f"{mission_libelle}::{label}".encode()
+        programme_code = hashlib.sha256(cle).hexdigest()[:16]
+        out.append(
+            DepenseRecord(
+                annee=annee,
+                mission_code="",
+                mission_libelle=mission_libelle,
+                programme_code=programme_code,
+                programme_libelle=label,
+                action_code=programme_code,
+                action_libelle=label,
+                ae=clean_montant(ae_str),
+                cp=clean_montant(cp_str),
+            )
+        )
+    return out
+
+
 def aggregate_depenses(records: list[DepenseRecord]) -> list[DepenseAggregat]:
     """Agrege les depenses par triplet (mission, programme, action): somme AE/CP.
 
@@ -1099,6 +1213,130 @@ def extract_prelevements_sur_recettes(
                 type_recettes,
             )
             collectivites += montant
+    return PrelevementsSurRecettes(
+        annee=annee, collectivites=collectivites, union_europeenne=union_europeenne
+    )
+
+
+# ---------------------------------------------------------------------------
+# Recettes: source Legifrance/PISTE (LFI 2026+), Etat A - I. Budget general
+# ---------------------------------------------------------------------------
+
+# Categories de "2e niveau" d'Etat A (ex "11.", "13 bis.", "31."), qui
+# regroupent normalement une ou plusieurs lignes numerotees. Distinctes des
+# categories de "1er niveau" ("1."-"4.", meme motif mais prefixe a 1 chiffre
+# - cf. `_etat_a_lignes_utiles`).
+_CATEGORIE_NIVEAU2_RE = re.compile(r"^(\d{1,2})(?:\s+(?:bis|ter|quater))?\.\s")
+
+
+def _etat_a_lignes_utiles(rows: list[list[tuple[str, str]]]) -> list[tuple[float, str]]:
+    """Retourne (code_ligne, montant_brut_texte) pour chaque ligne de detail
+    reelle d'Etat A - I. Budget general (LFI 2026+).
+
+    Deux origines possibles pour une ligne "utile":
+    - une ligne numerotee classique (colonne "Numero de ligne" non vide, ex
+      "1101", "1501") -> `code_ligne` = ce numero tel quel;
+    - une categorie de 2e niveau (ex "18. Autres remboursements et
+      degrevements d'impots d'Etat") qui n'a AUCUNE ligne numerotee en
+      dessous (observe sur la LFI 2026 pour la ligne "18.": categorie
+      normalement detaillee par ligne(s) numerotee(s), comme "11."-"17." ou
+      "21."-"26.", mais qui cette annee-la porte son montant directement,
+      sans enfant) -> `code_ligne` SYNTHETIQUE = numero de categorie * 100
+      (ex 1800), pour rester dans la meme convention de plage que les vrais
+      codes de detail. Ceci permet a `normalize_recettes_legifrance_2026`
+      et `extract_prelevements_sur_recettes_legifrance` de filtrer/mapper
+      les deux origines de facon identique (y compris si une categorie PSR,
+      "31."/"32.", devait un jour se retrouver sans ligne numerotee).
+
+    Une categorie de 2e niveau qui a bien une ligne numerotee juste en
+    dessous (le cas normal, ex "11. Impot net sur le revenu" suivie de
+    "1101") est un PARENT: son propre montant duplique celui de son (ses)
+    enfant(s) et est donc exclu (sous peine de compter deux fois).
+
+    Les categories de 1er niveau ("1."-"4.") sont toujours exclues: "1."-
+    "3." n'ont jamais de montant propre (uniquement leurs sous-categories
+    "11."-"18."/"21."-"26."/"31."-"32."), et "4. Fonds de concours et
+    attributions de produits" est volontairement hors du perimetre
+    "recettes nettes des prelevements" (n'entre pas dans le total de
+    controle "Total des recettes, nettes des prelevements" affiche
+    nativement par la source - verifie par recoupement).
+    """
+    out: list[tuple[float, str]] = []
+    for i, row in enumerate(rows):
+        numero, label, montant = row[0][1].strip(), row[1][1].strip(), row[2][1].strip()
+        if numero:
+            out.append((float(numero), montant))
+            continue
+        categorie_match = _CATEGORIE_NIVEAU2_RE.match(label)
+        if categorie_match is None or len(categorie_match.group(1)) != 2:
+            continue
+        prochaine_ligne_est_detail = i + 1 < len(rows) and rows[i + 1][0][1].strip().isdigit()
+        if not prochaine_ligne_est_detail and montant:
+            out.append((float(categorie_match.group(1)) * 100, montant))
+    return out
+
+
+def normalize_recettes_legifrance_2026(etat_a_html: str, annee: int = 2026) -> list[RecetteRecord]:
+    """Normalise l'Etat A (Voies et moyens, I. - Budget general) de la LFI
+    2026 (et, potentiellement, des annees suivantes au meme format) en
+    `RecetteRecord`.
+
+    `etat_a_html` est le fragment HTML de la table "I." (deja isole par
+    `api.etl.run._extract_etats_html` - Etat A contient PLUSIEURS tables
+    concatenees dans la reponse brute: Budget general, puis Budgets
+    annexes, Comptes d'affectation speciale, Comptes de concours financiers
+    - seule la premiere (Budget general) est retenue ici, cf. `api.etl.
+    sources`).
+
+    Exclut les lignes "3. Prelevements sur les recettes de l'Etat" (codes
+    31xx/32xx), traitees a part par
+    `extract_prelevements_sur_recettes_legifrance` sur les MEMES lignes
+    (avant filtrage) - meme principe que `normalize_recettes_records_json`/
+    `extract_prelevements_sur_recettes` pour la source 2024-2025.
+
+    Mapping vers `TypeRecette` via `CODE_LIGNE_RECETTE_VERS_TYPE` (par
+    `code_ligne`, pas par libelle - les libelles changent, ex TICPE ->
+    "Accises sur les energies (ex-TICPE)" en 2026, mais les codes restent
+    stables). Tout code absent de cette table (dont les codes synthetiques
+    de categorie sans enfant, cf. `_etat_a_lignes_utiles`) tombe dans
+    `AUTRES`.
+    """
+    rows = parse_html_table_rows(etat_a_html)
+    out: list[RecetteRecord] = []
+    for code, montant in _etat_a_lignes_utiles(rows):
+        if 3100 <= code < 3300:
+            continue
+        type_str = CODE_LIGNE_RECETTE_VERS_TYPE.get(code, "AUTRES")
+        out.append(
+            RecetteRecord(annee=annee, type=TypeRecette(type_str), montant=clean_montant(montant))
+        )
+    return out
+
+
+def extract_prelevements_sur_recettes_legifrance(
+    etat_a_html: str, annee: int
+) -> PrelevementsSurRecettes:
+    """Isole et somme les PSR (prelevements sur recettes) d'Etat A - I. Budget
+    general (LFI 2026+).
+
+    Contrairement a la source records JSON 2024-2025
+    (`extract_prelevements_sur_recettes`, ou les PSR sont un
+    `type_de_recettes` distinct au sein d'un flux de lignes plat), Etat A
+    les presente directement dans son arborescence, sous la categorie "3.
+    Prelevements sur les recettes de l'Etat" (sous-categories "31."
+    collectivites territoriales et "32." Union europeenne, codes de detail
+    31xx/32xx) - memes lignes que celles exclues par
+    `normalize_recettes_legifrance_2026`, via le meme helper
+    `_etat_a_lignes_utiles`.
+    """
+    rows = parse_html_table_rows(etat_a_html)
+    collectivites = 0.0
+    union_europeenne = 0.0
+    for code, montant in _etat_a_lignes_utiles(rows):
+        if 3100 <= code < 3200:
+            collectivites += clean_montant(montant)
+        elif 3200 <= code < 3300:
+            union_europeenne += clean_montant(montant)
     return PrelevementsSurRecettes(
         annee=annee, collectivites=collectivites, union_europeenne=union_europeenne
     )

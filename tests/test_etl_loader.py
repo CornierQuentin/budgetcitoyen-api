@@ -467,6 +467,81 @@ async def test_get_remboursements_degrevements_cp_somme_la_mission_rd(
 
 
 # ---------------------------------------------------------------------------
+# get_remboursements_degrevements_impots_etat_cp
+# ---------------------------------------------------------------------------
+
+
+async def test_get_remboursements_degrevements_impots_etat_cp_ignore_les_impots_locaux(
+    db_session: AsyncSession,
+) -> None:
+    """LFI 2026 (Etat A): "Remboursements et degrevements" a 2 programmes
+    ("...d'impots d'Etat" et "...d'impots locaux") - seul le premier doit
+    etre regrossi (les remboursements d'impots locaux ne sont jamais
+    netes d'une recette d'Etat, cf. docstring de la fonction). Aucun code
+    disponible (mission ET programme) sur cette source: recherche par slug
+    de mission + libelle de programme.
+    """
+    mapping = await loader.upsert_missions(
+        db_session,
+        [
+            MissionYearRow(
+                slug="remboursements-et-degrevements",
+                nom_normalise="remboursements et degrevements",
+                nom_officiel="Remboursements et degrevements",
+                annee=2026,
+                code_mission=None,
+            )
+        ],
+    )
+    await db_session.commit()
+
+    mission_id = mapping[("remboursements-et-degrevements", 2026)]
+    await loader.upsert_depenses(
+        db_session,
+        2026,
+        [
+            (
+                _aggregat(
+                    mission_code="",
+                    mission_libelle="Remboursements et degrevements",
+                    programme_code="hash-etat",
+                    programme_libelle="Remboursements et dégrèvements d'impôts d'Etat",
+                    action_code="hash-etat",
+                    cp=141174362742.0,
+                    annee=2026,
+                ),
+                mission_id,
+            ),
+            (
+                _aggregat(
+                    mission_code="",
+                    mission_libelle="Remboursements et degrevements",
+                    programme_code="hash-locaux",
+                    programme_libelle="Remboursements et dégrèvements d'impôts locaux",
+                    action_code="hash-locaux",
+                    cp=4426000000.0,
+                    annee=2026,
+                ),
+                mission_id,
+            ),
+        ],
+    )
+    await db_session.commit()
+
+    total = await loader.get_remboursements_degrevements_impots_etat_cp(db_session, 2026)
+
+    assert total == 141174362742.0
+
+
+async def test_get_remboursements_degrevements_impots_etat_cp_sans_donnees_retourne_zero(
+    db_session: AsyncSession,
+) -> None:
+    total = await loader.get_remboursements_degrevements_impots_etat_cp(db_session, 2026)
+
+    assert total == 0.0
+
+
+# ---------------------------------------------------------------------------
 # recalculer_annee_budget
 # ---------------------------------------------------------------------------
 

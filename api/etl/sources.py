@@ -57,6 +57,48 @@ la Cour des comptes (voir RECETTES_COUR_DES_COMPTES_* ci-dessous et le
 docstring de `api.etl.normalize.normalize_recettes_cour_des_comptes`). 2015
 et 2021 restent des trous reels (aucune des deux sources ne fournit un
 tableau exploitable pour ces annees - voir ces memes constantes).
+
+- 2026: source radicalement differente des annees precedentes - aucun
+  dataset data.economie.gouv.fr n'existe pour ce millesime (verifie: portail
+  non alimente au-dela de 2025 au moment de l'implementation). Depenses ET
+  recettes proviennent toutes deux du texte meme de la LFI 2026 (loi n°
+  2026-103 du 19 fevrier 2026, JORF n°0043 du 20/02/2026), recupere via
+  l'API officielle Legifrance (plateforme PISTE, OAuth2 client_credentials -
+  voir PISTE_* dans `api.core.config.Settings`), PAS via une piece jointe ou
+  un dataset "records": Legifrance bloque les requetes non-navigateur
+  (Cloudflare) sur son site public, mais l'API PISTE elle est accessible en
+  direct par httpx une fois authentifiee.
+
+  La reponse de `POST /consult/jorf` (voir `LFI_TEXT_CID_PAR_ANNEE`) est un
+  JSON de l'ARTICULATION LEGALE du texte (sections/articles recursifs), pas
+  un jeu de donnees tabulaire: les annexes "Etat A" (recettes, "Voies et
+  moyens") et "Etat B" (depenses par mission/programme, "Budget general")
+  sont toutes deux imbriquees, avec les etats C-G, dans le HTML du `content`
+  d'un seul article sans numero repere par la marque textuelle "ETATS
+  LEGISLATIFS ANNEXES" (PAS par un id d'article fige, qui pourrait changer
+  en cas de texte rectificatif) - voir
+  `api.etl.run._extract_etats_html`/`api.etl.normalize.normalize_depenses_2026`/
+  `normalize_recettes_legifrance_2026` pour le detail du parsing.
+
+  Etat B ne fournit NI code mission NI decomposition par action (seulement
+  Mission -> Programme, avec une ligne memo "Dont titre 2" par programme, a
+  exclure de toute somme - deja incluse dans le total du programme): repli
+  sur le slug pour l'identite mission (meme mecanisme que 2013/2014/2016/
+  2017) et action synthetique unique par programme (limitation reelle de la
+  source, documentee, pas un bug).
+
+  Etat A inclut directement les prelevements sur recettes (PSR, categorie
+  "3." du tableau, sous-categories "31." collectivites et "32." Union
+  europeenne) contrairement a la source records JSON 2024-2025 ou ils sont
+  un `type_de_recettes` distinct - voir
+  `api.etl.normalize.extract_prelevements_sur_recettes_legifrance`. La
+  reforme fiscale 2026 eclate l'ancienne ligne TICPE (code 1501) en 4 codes
+  (1501 ex-TICPE, 1502 ex-TICGN, 1503 ex-TICFE, 1504 "Autres taxes
+  interieures") - les 4 sont regroupes dans le bucket TICPE existant
+  (`CODE_LIGNE_RECETTE_VERS_TYPE` etendu ci-dessous) pour preserver la
+  continuite de la serie dans le comparateur/historique, decision validee
+  explicitement avec l'utilisateur plutot que de les laisser tomber dans
+  AUTRES par defaut.
 """
 
 from api.core.config import get_settings
@@ -178,7 +220,20 @@ DEPENSES_ANNEES: tuple[int, ...] = (
     2023,
     2024,
     2025,
+    2026,
 )
+
+# Identifiant Legifrance (textCid) du texte de la LFI par annee, pour
+# `POST /consult/jorf` de l'API PISTE (voir docstring de module ci-dessus).
+LFI_TEXT_CID_PAR_ANNEE: dict[int, str] = {
+    2026: "JORFTEXT000053508155",
+}
+
+# Annees de recettes couvertes par la source Legifrance/PISTE - distincte de
+# RECETTES_ANNEES (data.economie.gouv.fr, 2024-2025) et RECETTES_COUR_DES_
+# COMPTES_ANNEES: un meme millesime ne doit jamais apparaitre dans plusieurs
+# de ces 3 tuples (double traitement non gere par `api.etl.run.run_etl`).
+RECETTES_LEGIFRANCE_ANNEES: tuple[int, ...] = tuple(sorted(LFI_TEXT_CID_PAR_ANNEE))
 
 # --------------------------------------------------------------------------
 # Recettes: seules 2024 et 2025 disposent d'un dataset "recettes du budget
@@ -193,11 +248,23 @@ RECETTES_ANNEES: tuple[int, ...] = (2024, 2025)
 
 # Codes de ligne de recette (code_ligne_recettes) mappes sur les buckets
 # TypeRecette stables. Tout code absent de cette table tombe dans AUTRES.
+#
+# 1502/1503/1504 (ex-TICGN, ex-TICFE, "Autres taxes interieures"): introduits
+# par la reforme fiscale 2026 qui eclate l'ancienne ligne unique TICPE
+# (code 1501) en 4 codes dans l'Etat A de la LFI 2026 - regroupes ici dans
+# le bucket TICPE (plutot que laisses tomber dans AUTRES par defaut) pour
+# preserver la continuite de la serie TICPE dans le comparateur/historique;
+# decision validee explicitement avec l'utilisateur (chantier ingestion LFI
+# 2026), l'alternative (exposer les 4 lignes separement) etant jugee trop
+# detaillee par rapport au reste de l'UI.
 CODE_LIGNE_RECETTE_VERS_TYPE: dict[float, str] = {
     1101.0: "IR",
     1301.0: "IS",
     1601.0: "TVA",
     1501.0: "TICPE",
+    1502.0: "TICPE",
+    1503.0: "TICPE",
+    1504.0: "TICPE",
 }
 
 # --------------------------------------------------------------------------
@@ -325,6 +392,16 @@ def attachment_url(dataset_id: str, attachment_id: str) -> str:
     return f"{API_EXPLORE_V21}/{dataset_id}/attachments/{attachment_id}"
 
 
+def legifrance_url(text_cid: str) -> str:
+    """URL publique (lisible par un humain) d'un texte Legifrance, par son textCid.
+
+    A ne PAS confondre avec l'endpoint API PISTE (`Settings.piste_api_base_url`,
+    protege par OAuth) - celle-ci est la page publique du site legifrance.gouv.fr,
+    utilisee comme lien de citation en frontend (`annee_budget.source_url`).
+    """
+    return f"https://www.legifrance.gouv.fr/jorf/id/{text_cid}"
+
+
 # --------------------------------------------------------------------------
 # Indicateurs macro: PIB nominal et population, pour les futurs indicateurs
 # "par habitant"/"par seconde" du frontend (ex. "Depenses = X EUR par
@@ -402,4 +479,6 @@ def default_depenses_source_url(annee: int) -> str | None:
     if annee in (2016, 2017, 2018, 2021, 2022):
         dataset_id = DEPENSES_DATASETS_ATTACHMENTS[annee]
         return attachment_url(dataset_id, DEPENSES_ATTACHMENT_IDS[annee]["detaillee"])
+    if annee in LFI_TEXT_CID_PAR_ANNEE:
+        return legifrance_url(LFI_TEXT_CID_PAR_ANNEE[annee])
     return None
