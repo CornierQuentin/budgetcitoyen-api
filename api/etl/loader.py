@@ -9,10 +9,16 @@ schema actuel (granularite fine geree par la cle primaire uniquement): pour
 rester idempotent sur des relances repetees, `upsert_depenses` recharge une
 annee dans son integralite (delete puis insert des lignes `annee = :annee`)
 plutot que de tenter un upsert ligne a ligne sans cle stable.
+
+`upsert_marches` pousse cette meme logique plus loin: `marche_public` n'a NI
+cle naturelle (l'`id` source n'est pas fiable, cf. son modele) NI notion
+d'annee - la table entiere est rechargee a chaque run, par lots (streaming
+depuis le normaliseur) plutot qu'en une seule liste Python de ~689 000
+elements en memoire.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, insert, select
@@ -22,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.etl.normalize import (
     DepenseAggregat,
     DepenseFiscaleRecord,
+    MarcheRecord,
     MissionAliasRow,
     MissionYearRow,
     RecetteAggregat,
@@ -32,6 +39,7 @@ from api.models.depense import Depense
 from api.models.depense_fiscale import DepenseFiscale
 from api.models.indicateur_macro import IndicateurMacro
 from api.models.ingestion_log import IngestionLog
+from api.models.marche_public import MarchePublic
 from api.models.mission import Mission
 from api.models.mission_alias import MissionAlias
 from api.models.programme import Programme
@@ -535,6 +543,52 @@ async def upsert_depenses_fiscales(
     await db.execute(insert(DepenseFiscale), values)
     logger.info("depenses_fiscales upsertees pour %d: %d lignes", annee, len(values))
     return len(values)
+
+
+async def upsert_marches(db: AsyncSession, batches: Iterable[Sequence[MarcheRecord]]) -> int:
+    """Recharge integralement `marche_public`: delete-all puis reinsert par
+    lots (streaming depuis le normaliseur, jamais une liste Python complete
+    en memoire - cf. docstring de module). Pas d'upsert par cle naturelle
+    possible (`id` source non fiable, cf. `MarchePublic.marche_id_source`).
+
+    Le tout dans la meme transaction que le reste de `run_etl()` (deja
+    commit/rollback en bloc): un echec en cours de run annule aussi le
+    `delete()`, comportement all-or-nothing correct pour une strategie de
+    remplacement integral.
+    """
+    await db.execute(delete(MarchePublic))
+
+    total = 0
+    for batch in batches:
+        if not batch:
+            continue
+        values = [
+            {
+                "marche_id_source": r.marche_id_source,
+                "nature": r.nature,
+                "objet": r.objet,
+                "objet_recherche": r.objet_recherche,
+                "codecpv": r.codecpv,
+                "codecpv_division": r.codecpv_division,
+                "procedure": r.procedure,
+                "acheteur_siret": r.acheteur_siret,
+                "titulaire_siret": r.titulaire_siret,
+                "titulaire_id_type": r.titulaire_id_type,
+                "dureemois": r.dureemois,
+                "datenotification": r.datenotification,
+                "datepublicationdonnees": r.datepublicationdonnees,
+                "montant": r.montant,
+                "formeprix": r.formeprix,
+                "offresrecues": r.offresrecues,
+                "marcheinnovant": r.marcheinnovant,
+            }
+            for r in batch
+        ]
+        await db.execute(insert(MarchePublic), values)
+        total += len(values)
+
+    logger.info("marches upsertes: %d lignes", total)
+    return total
 
 
 async def enregistrer_ingestion_terminee(db: AsyncSession) -> None:

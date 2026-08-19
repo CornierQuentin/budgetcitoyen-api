@@ -573,3 +573,29 @@ DEPENSE_FISCALE_ATTACHMENT_ID = "plf2023_voies_et_moyens_t2_liste_des_depenses_f
 # source. Le bandeau frontend doit donc citer 2021 (dernier realise connu),
 # pas 2023, comme annee des donnees.
 DEPENSE_FISCALE_ANNEE = 2021
+
+
+# --------------------------------------------------------------------------
+# Marches publics (DECP - Donnees Essentielles de la Commande Publique)
+# --------------------------------------------------------------------------
+
+# "2022" designe la VERSION DU FORMAT LEGAL (arrete du 22/12/2022 qui definit
+# le schema des colonnes), PAS une restriction d'annee - verifie directement:
+# la colonne `datenotification` s'etale de 2010-06-02 a aujourd'hui,
+# actualisee quotidiennement (`frequency: daily`). Le dataset frere au format
+# anterieur (`decp-v3-marches-valides`, arrete 2019-03-22) est ecarte:
+# schema different a reconcilier, pour un gain faible (les noms d'entreprise
+# y sont NULL aussi en pratique). ~689 000 lignes, 54 colonnes source (17
+# retenues, cf. `api.etl.normalize.normalize_marches_parquet`).
+MARCHES_DATASET_ID = "decp-2022-marches-valides"
+
+
+def parquet_export_url(dataset_id: str) -> str:
+    """URL d'export Parquet en masse d'un dataset (endpoint `/exports/parquet`,
+    distinct de `records_url`/`attachment_url` ci-dessus). Seul format
+    pertinent pour un dataset a ~689 000 lignes: paginer via `/records` a 100
+    lignes/page (cf. `api.etl.run._fetch_all_records`) prendrait ~6 900
+    requetes HTTP. Verifie a l'execution reelle: 82,6 Mo pour la totalite du
+    dataset marches (colonnaire + compresse), telecharge en un seul GET.
+    """
+    return f"{API_EXPLORE_V21}/{dataset_id}/exports/parquet"
