@@ -465,7 +465,7 @@ async def test_fetch_depenses_annee_2026_cas_legifrance(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(run, "_fetch_lfi_jorf", _fake_fetch_lfi_jorf)
     monkeypatch.setattr(run, "_extract_etats_html", lambda jorf: ("etat-a", "etat-b"))
-    monkeypatch.setattr(normalize, "normalize_depenses_2026", lambda etat_b, a: sentinel)
+    monkeypatch.setattr(normalize, "normalize_depenses_legifrance", lambda etat_b, a: sentinel)
 
     async with httpx.AsyncClient() as client:
         records, source_url = await run._fetch_depenses_annee(client, 2026)
@@ -474,10 +474,65 @@ async def test_fetch_depenses_annee_2026_cas_legifrance(monkeypatch: pytest.Monk
     assert source_url == sources.legifrance_url(text_cid)
 
 
-async def test_fetch_depenses_annee_leve_pour_une_annee_hors_perimetre() -> None:
+async def test_fetch_depenses_annee_2015_cas_legifrance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2015 comble un trou reel du backfill historique via la meme source
+    Legifrance que 2026 (meme branche de dispatch, meme normalizer)."""
+    sentinel = [object()]
+    text_cid = sources.LFI_TEXT_CID_PAR_ANNEE[2015]
+
+    async def _fake_fetch_lfi_jorf(_client: httpx.AsyncClient, cid: str) -> dict:
+        assert cid == text_cid
+        return {"fake": "jorf"}
+
+    monkeypatch.setattr(run, "_fetch_lfi_jorf", _fake_fetch_lfi_jorf)
+    monkeypatch.setattr(run, "_extract_etats_html", lambda jorf: ("etat-a", "etat-b"))
+    monkeypatch.setattr(normalize, "normalize_depenses_legifrance", lambda etat_b, a: sentinel)
+
     async with httpx.AsyncClient() as client:
-        with pytest.raises(ValueError, match="2015"):
-            await run._fetch_depenses_annee(client, 2015)
+        records, source_url = await run._fetch_depenses_annee(client, 2015)
+
+    assert records is sentinel
+    assert source_url == sources.legifrance_url(text_cid)
+
+
+async def test_fetch_depenses_annee_2021_reste_route_vers_l_attachment_existant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2021 est dans LFI_TEXT_CID_PAR_ANNEE (pour les recettes) mais ses
+    depenses doivent rester routees vers la source attachment CSV existante
+    (branche `elif annee in (2021, 2022):`, placee AVANT la branche
+    Legifrance dans le dispatch) - jamais vers Legifrance, qui ne serait
+    meme pas appelee ici (verifie en ne bouchonnant PAS `_fetch_lfi_jorf`:
+    un appel intempestif ferait echouer ce test avec une vraie tentative
+    reseau).
+    """
+    sentinel = [object()]
+
+    async def _fake_fetch_attachment_text(
+        _client: httpx.AsyncClient, _dataset_id: str, _attachment_id: str, encoding: str = "cp1252"
+    ) -> str:
+        return "texte-brut"
+
+    monkeypatch.setattr(run, "_fetch_attachment_text", _fake_fetch_attachment_text)
+    monkeypatch.setattr(
+        normalize, "normalize_depenses_attachment_detaillee", lambda text, a: sentinel
+    )
+
+    async with httpx.AsyncClient() as client:
+        records, source_url = await run._fetch_depenses_annee(client, 2021)
+
+    assert records is sentinel
+    dataset_id = sources.DEPENSES_DATASETS_ATTACHMENTS[2021]
+    attachment_id = sources.DEPENSES_ATTACHMENT_IDS[2021]["detaillee"]
+    assert source_url == sources.attachment_url(dataset_id, attachment_id)
+
+
+async def test_fetch_depenses_annee_leve_pour_une_annee_hors_perimetre() -> None:
+    # 2008: trou reel documente (depenses 2006-2010) - 2015 est desormais
+    # couvert (source Legifrance), plus un exemple valide de trou.
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(ValueError, match="2008"):
+            await run._fetch_depenses_annee(client, 2008)
 
 
 # ---------------------------------------------------------------------------
@@ -561,10 +616,14 @@ async def test_charger_recettes_legifrance_enchaine_fetch_normalize_et_load(
     monkeypatch.setattr(run, "_fetch_lfi_jorf", _fake_fetch_lfi_jorf)
     monkeypatch.setattr(run, "_extract_etats_html", lambda jorf: ("etat-a", "etat-b"))
     monkeypatch.setattr(
-        normalize, "normalize_recettes_legifrance_2026", lambda etat_a, a: recette_records
+        normalize,
+        "normalize_recettes_legifrance",
+        lambda etat_a, a, **_kwargs: recette_records,
     )
     monkeypatch.setattr(
-        normalize, "extract_prelevements_sur_recettes_legifrance", lambda etat_a, a: psr
+        normalize,
+        "extract_prelevements_sur_recettes_legifrance",
+        lambda etat_a, a, **_kwargs: psr,
     )
 
     async with httpx.AsyncClient() as client:
@@ -578,6 +637,48 @@ async def test_charger_recettes_legifrance_enchaine_fetch_normalize_et_load(
         )
     ).scalar_one()
     assert recette.montant_net == 100.0
+
+
+async def test_charger_recettes_legifrance_calcule_unite_milliers_par_annee(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`unite_milliers` (cf. `api.etl.sources.LFI_ETAT_A_MILLIERS_EUROS`) doit
+    valoir True pour 2015 et False pour toute autre annee de cette source -
+    verifie ici le CABLAGE (quel argument est effectivement transmis aux 2
+    fonctions de normalisation), pas la conversion elle-meme (deja testee
+    dans test_etl_normalize.py).
+    """
+    appels_unite: dict[int, list[bool]] = {}
+
+    async def _fake_fetch_lfi_jorf(_client: httpx.AsyncClient, _text_cid: str) -> dict:
+        return {"fake": "jorf"}
+
+    def _fake_normalize(etat_a: str, annee: int, *, unite_milliers: bool = False) -> list:
+        appels_unite.setdefault(annee, []).append(unite_milliers)
+        return []
+
+    def _fake_extract_psr(
+        etat_a: str, annee: int, *, unite_milliers: bool = False
+    ) -> normalize.PrelevementsSurRecettes:
+        appels_unite.setdefault(annee, []).append(unite_milliers)
+        return normalize.PrelevementsSurRecettes(
+            annee=annee, collectivites=0.0, union_europeenne=0.0
+        )
+
+    monkeypatch.setattr(run, "_fetch_lfi_jorf", _fake_fetch_lfi_jorf)
+    monkeypatch.setattr(run, "_extract_etats_html", lambda jorf: ("etat-a", "etat-b"))
+    monkeypatch.setattr(normalize, "normalize_recettes_legifrance", _fake_normalize)
+    monkeypatch.setattr(
+        normalize, "extract_prelevements_sur_recettes_legifrance", _fake_extract_psr
+    )
+
+    async with httpx.AsyncClient() as client:
+        await run._charger_recettes_legifrance(db_session, client, [2015, 2021, 2026])
+    await db_session.commit()
+
+    assert appels_unite[2015] == [True, True]
+    assert appels_unite[2021] == [False, False]
+    assert appels_unite[2026] == [False, False]
 
 
 async def test_charger_recettes_legifrance_regrossit_avec_remboursements_et_degrevements(
@@ -644,10 +745,14 @@ async def test_charger_recettes_legifrance_regrossit_avec_remboursements_et_degr
     monkeypatch.setattr(run, "_fetch_lfi_jorf", _fake_fetch_lfi_jorf)
     monkeypatch.setattr(run, "_extract_etats_html", lambda jorf: ("etat-a", "etat-b"))
     monkeypatch.setattr(
-        normalize, "normalize_recettes_legifrance_2026", lambda etat_a, a: recette_records
+        normalize,
+        "normalize_recettes_legifrance",
+        lambda etat_a, a, **_kwargs: recette_records,
     )
     monkeypatch.setattr(
-        normalize, "extract_prelevements_sur_recettes_legifrance", lambda etat_a, a: psr
+        normalize,
+        "extract_prelevements_sur_recettes_legifrance",
+        lambda etat_a, a, **_kwargs: psr,
     )
 
     async with httpx.AsyncClient() as client:
@@ -660,6 +765,87 @@ async def test_charger_recettes_legifrance_regrossit_avec_remboursements_et_degr
         )
     ).scalar_one()
     assert autres.montant_net == pytest.approx(141174362742.0)
+
+
+async def test_charger_recettes_legifrance_2015_n_applique_aucun_rattrapage(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A la difference de 2026, la LFI 2015 (article 49) n'a besoin d'AUCUN
+    rattrapage brut/net cote recettes: la somme brute des lignes d'Etat A
+    (hors PSR) correspond deja exactement a la ligne "recettes brutes" du
+    tableau d'equilibre officiel, comparee a des depenses elles-memes
+    brutes - la mission "Remboursements et degrevements" s'annule
+    mathematiquement des 2 cotes sans intervention. 2 bugs reels trouves
+    en verifiant ce tableau plutot que de supposer une convention deja
+    verifiee ailleurs: appliquer le rattrapage "impots d'Etat seul" (2026)
+    donnait un deficit de 43,0 Md EUR au lieu du solde officiel -172,4 Md
+    EUR (pour 2021); appliquer le rattrapage "mission entiere" (Cour des
+    comptes) donnait -13,6 Md EUR (un surplus implausible) au lieu de
+    -74,2 Md EUR officiels (pour 2015, teste ici) - dans les 2 cas, seule
+    l'ABSENCE totale de rattrapage etait correcte. Une mission "RD" est
+    seedee ici avec un CP non nul pour bien verifier qu'elle est ignoree,
+    pas juste absente.
+    """
+    annee = 2015
+    assert annee not in sources.LFI_REMBOURSEMENTS_IMPOTS_ETAT_SEUL
+    mapping = await loader.upsert_missions(
+        db_session,
+        [
+            normalize.MissionYearRow(
+                slug="remboursements-et-degrevements",
+                nom_normalise="remboursements et degrevements",
+                nom_officiel="Remboursements et degrevements",
+                annee=annee,
+                code_mission=None,
+            )
+        ],
+    )
+    await db_session.commit()
+    mission_id = mapping[("remboursements-et-degrevements", annee)]
+    rd_etat = normalize.DepenseAggregat(
+        annee=annee,
+        mission_code="",
+        mission_libelle="Remboursements et degrevements",
+        programme_code="hash-etat",
+        programme_libelle="Remboursements et dégrèvements d'impôts d'Etat",
+        action_code="hash-etat",
+        action_libelle="Remboursements et dégrèvements d'impôts d'Etat",
+        ae=87800000000.0,
+        cp=87800000000.0,
+    )
+    await loader.upsert_depenses(db_session, annee, [(rd_etat, mission_id)])
+    await db_session.commit()
+
+    recette_records = [normalize.RecetteRecord(annee=annee, type=TypeRecette.IR, montant=100.0)]
+    psr = normalize.PrelevementsSurRecettes(annee=annee, collectivites=0.0, union_europeenne=0.0)
+
+    async def _fake_fetch_lfi_jorf(_client: httpx.AsyncClient, _text_cid: str) -> dict:
+        return {"fake": "jorf"}
+
+    monkeypatch.setattr(run, "_fetch_lfi_jorf", _fake_fetch_lfi_jorf)
+    monkeypatch.setattr(run, "_extract_etats_html", lambda jorf: ("etat-a", "etat-b"))
+    monkeypatch.setattr(
+        normalize,
+        "normalize_recettes_legifrance",
+        lambda etat_a, a, **_kwargs: recette_records,
+    )
+    monkeypatch.setattr(
+        normalize,
+        "extract_prelevements_sur_recettes_legifrance",
+        lambda etat_a, a, **_kwargs: psr,
+    )
+
+    async with httpx.AsyncClient() as client:
+        await run._charger_recettes_legifrance(db_session, client, [annee])
+    await db_session.commit()
+
+    # Aucune ligne AUTRES ajoutee: seul le RecetteRecord IR bouchonne est present.
+    autres = (
+        await db_session.execute(
+            select(Recette).where(Recette.annee == annee, Recette.type == TypeRecette.AUTRES)
+        )
+    ).scalar_one_or_none()
+    assert autres is None
 
 
 async def test_charger_recettes_cour_des_comptes_avec_tableau_equilibre(
@@ -911,7 +1097,9 @@ async def test_run_etl_annee_hors_perimetre_logge_un_avertissement(
     monkeypatch.setattr(run.loader, "recalculer_annee_budget", lambda *a, **k: _none_coro())
 
     with caplog.at_level("WARNING"):
-        await run.run_etl([2015], depenses=True, recettes=True, indicateurs=False)
+        # 2008: trou reel documente (depenses 2006-2010) - 2015 est
+        # desormais couvert (source Legifrance), plus un exemple valide.
+        await run.run_etl([2008], depenses=True, recettes=True, indicateurs=False)
 
     assert "hors perimetre" in caplog.text
 

@@ -1007,10 +1007,13 @@ def normalize_depenses_attachment_detaillee(csv_text: str, annee: int) -> list[D
     return out
 
 
-def normalize_depenses_2026(etat_b_html: str, annee: int = 2026) -> list[DepenseRecord]:
+def normalize_depenses_legifrance(etat_b_html: str, annee: int) -> list[DepenseRecord]:
     """Normalise l'Etat B (repartition par mission et programme des credits du
-    budget general) de la LFI 2026 (et, potentiellement, des annees
-    suivantes au meme format) en `DepenseRecord`.
+    budget general) d'une LFI recuperee via l'API Legifrance/PISTE, en
+    `DepenseRecord`. Format verifie identique sur 2015, 2021 et 2026 (seules
+    annees couvertes par cette source cote depenses a ce jour - 2021 n'en a
+    en realite pas besoin, deja couverte par
+    `DEPENSES_DATASETS_ATTACHMENTS`, cf. `api.etl.sources`).
 
     `etat_b_html` est le fragment HTML de la table "I." (deja isole par
     `api.etl.run._extract_etats_html` - Etat B ne contient qu'une seule
@@ -1019,12 +1022,18 @@ def normalize_depenses_2026(etat_b_html: str, annee: int = 2026) -> list[Depense
 
     Mission et Programme sont distingues par l'attribut `align` de la
     premiere cellule de chaque ligne (`center` = Mission, `left` =
-    Programme/"Dont titre 2"/"Total") - verifie exhaustivement sur les 213
-    lignes de la LFI 2026 (32 missions, 131 programmes, 49 lignes "Dont
-    titre 2", 1 ligne "Total"). "Dont titre 2" est un memo deja inclus dans
-    le total du programme (exclu de toute somme, sous peine de doubler ce
-    montant). La ligne finale "Total" sert uniquement de cross-check
-    externe (voir tests), jamais integree au parsing.
+    Programme/"Dont titre 2"/ligne de total) - verifie exhaustivement sur
+    les 213 lignes de la LFI 2026 (32 missions, 131 programmes, 49 lignes
+    "Dont titre 2", 1 ligne "Total"). "Dont titre 2" est un memo deja
+    inclus dans le total du programme (exclu de toute somme, sous peine de
+    doubler ce montant). La ligne de total final sert de cross-check externe
+    (voir tests) - son libelle EXACT change selon l'annee: "Total" (2021,
+    2026) mais "Totaux" (pluriel) pour la LFI 2015 - bug reel trouve a
+    l'execution contre les vraies donnees 2015 (non detectable en test
+    unitaire seul avec une fixture calquee sur 2026): sans exclure aussi
+    "Totaux", cette ligne est traitee comme un programme normal et double le
+    total calcule (822 Md EUR au lieu de 411 Md EUR, ecart de EXACTEMENT le
+    montant de cette seule ligne). Les deux libelles sont donc exclus.
 
     Contrairement a TOUTES les generations de source precedentes (y compris
     2016/2017, qui n'ont pas de code mission mais ont un vrai code
@@ -1052,6 +1061,12 @@ def normalize_depenses_2026(etat_b_html: str, annee: int = 2026) -> list[Depense
     action_libelle` reprennent ceux du programme): limitation reelle de
     cette source (aucune granularite plus fine disponible, a la difference
     de toutes les autres annees), documentee plutot que masquee.
+
+    A la difference des autres normalizers de ce module (qui utilisent tous
+    `annee` comme parametre nomme optionnel refletant l'annee "typique" du
+    format), `annee` est ici OBLIGATOIRE et sans valeur par defaut: cette
+    source sert deja 2 annees non consecutives (2015, 2026) sans qu'aucune
+    ne soit plus "par defaut" qu'une autre.
     """
     rows = parse_html_table_rows(etat_b_html)
     out: list[DepenseRecord] = []
@@ -1062,7 +1077,7 @@ def normalize_depenses_2026(etat_b_html: str, annee: int = 2026) -> list[Depense
         if align == "center":
             mission_libelle = label
             continue
-        if label in ("Dont titre 2", "Total"):
+        if label in ("Dont titre 2", "Total", "Totaux"):
             continue
         cle = f"{mission_libelle}::{label}".encode()
         programme_code = hashlib.sha256(cle).hexdigest()[:16]
@@ -1219,7 +1234,8 @@ def extract_prelevements_sur_recettes(
 
 
 # ---------------------------------------------------------------------------
-# Recettes: source Legifrance/PISTE (LFI 2026+), Etat A - I. Budget general
+# Recettes: source Legifrance/PISTE (LFI 2015, 2021, 2026), Etat A - I.
+# Budget general
 # ---------------------------------------------------------------------------
 
 # Categories de "2e niveau" d'Etat A (ex "11.", "13 bis.", "31."), qui
@@ -1243,10 +1259,16 @@ def _etat_a_lignes_utiles(rows: list[list[tuple[str, str]]]) -> list[tuple[float
       "21."-"26.", mais qui cette annee-la porte son montant directement,
       sans enfant) -> `code_ligne` SYNTHETIQUE = numero de categorie * 100
       (ex 1800), pour rester dans la meme convention de plage que les vrais
-      codes de detail. Ceci permet a `normalize_recettes_legifrance_2026`
+      codes de detail. Ceci permet a `normalize_recettes_legifrance`
       et `extract_prelevements_sur_recettes_legifrance` de filtrer/mapper
       les deux origines de facon identique (y compris si une categorie PSR,
       "31."/"32.", devait un jour se retrouver sans ligne numerotee).
+
+    Retourne les montants BRUTS, tels qu'ecrits dans la source (pas encore
+    convertis pour tenir compte d'une eventuelle unite "milliers d'euros" -
+    cf. parametre `unite_milliers` de `normalize_recettes_legifrance`/
+    `extract_prelevements_sur_recettes_legifrance`, qui appliquent la
+    conversion APRES cet appel).
 
     Une categorie de 2e niveau qui a bien une ligne numerotee juste en
     dessous (le cas normal, ex "11. Impot net sur le revenu" suivie de
@@ -1276,10 +1298,13 @@ def _etat_a_lignes_utiles(rows: list[list[tuple[str, str]]]) -> list[tuple[float
     return out
 
 
-def normalize_recettes_legifrance_2026(etat_a_html: str, annee: int = 2026) -> list[RecetteRecord]:
-    """Normalise l'Etat A (Voies et moyens, I. - Budget general) de la LFI
-    2026 (et, potentiellement, des annees suivantes au meme format) en
-    `RecetteRecord`.
+def normalize_recettes_legifrance(
+    etat_a_html: str, annee: int, *, unite_milliers: bool = False
+) -> list[RecetteRecord]:
+    """Normalise l'Etat A (Voies et moyens, I. - Budget general) d'une LFI
+    recuperee via l'API Legifrance/PISTE en `RecetteRecord`. Format verifie
+    identique sur 2015, 2021 et 2026 (memes codes de ligne stables, meme
+    structure de tableau).
 
     `etat_a_html` est le fragment HTML de la table "I." (deja isole par
     `api.etl.run._extract_etats_html` - Etat A contient PLUSIEURS tables
@@ -1287,6 +1312,13 @@ def normalize_recettes_legifrance_2026(etat_a_html: str, annee: int = 2026) -> l
     annexes, Comptes d'affectation speciale, Comptes de concours financiers
     - seule la premiere (Budget general) est retenue ici, cf. `api.etl.
     sources`).
+
+    `unite_milliers`: la LFI 2015 exprime Etat A en MILLIERS d'euros ("(En
+    milliers d'euros)", verifie dans l'en-tete de la table) alors qu'Etat B
+    de la MEME loi est deja en euros (asymetrie au sein d'un seul document)
+    - cf. `api.etl.sources.LFI_ETAT_A_MILLIERS_EUROS`. 2021 et 2026 sont
+    tous deux en euros. Quand `True`, chaque montant est multiplie par
+    1000 apres nettoyage (`clean_montant`).
 
     Exclut les lignes "3. Prelevements sur les recettes de l'Etat" (codes
     31xx/32xx), traitees a part par
@@ -1297,10 +1329,11 @@ def normalize_recettes_legifrance_2026(etat_a_html: str, annee: int = 2026) -> l
     Mapping vers `TypeRecette` via `CODE_LIGNE_RECETTE_VERS_TYPE` (par
     `code_ligne`, pas par libelle - les libelles changent, ex TICPE ->
     "Accises sur les energies (ex-TICPE)" en 2026, mais les codes restent
-    stables). Tout code absent de cette table (dont les codes synthetiques
-    de categorie sans enfant, cf. `_etat_a_lignes_utiles`) tombe dans
-    `AUTRES`.
+    stables, verifie identiques sur 2015/2021/2026). Tout code absent de
+    cette table (dont les codes synthetiques de categorie sans enfant, cf.
+    `_etat_a_lignes_utiles`) tombe dans `AUTRES`.
     """
+    multiplicateur = 1000.0 if unite_milliers else 1.0
     rows = parse_html_table_rows(etat_a_html)
     out: list[RecetteRecord] = []
     for code, montant in _etat_a_lignes_utiles(rows):
@@ -1308,16 +1341,20 @@ def normalize_recettes_legifrance_2026(etat_a_html: str, annee: int = 2026) -> l
             continue
         type_str = CODE_LIGNE_RECETTE_VERS_TYPE.get(code, "AUTRES")
         out.append(
-            RecetteRecord(annee=annee, type=TypeRecette(type_str), montant=clean_montant(montant))
+            RecetteRecord(
+                annee=annee,
+                type=TypeRecette(type_str),
+                montant=clean_montant(montant) * multiplicateur,
+            )
         )
     return out
 
 
 def extract_prelevements_sur_recettes_legifrance(
-    etat_a_html: str, annee: int
+    etat_a_html: str, annee: int, *, unite_milliers: bool = False
 ) -> PrelevementsSurRecettes:
     """Isole et somme les PSR (prelevements sur recettes) d'Etat A - I. Budget
-    general (LFI 2026+).
+    general (source Legifrance/PISTE, LFI 2015/2021/2026).
 
     Contrairement a la source records JSON 2024-2025
     (`extract_prelevements_sur_recettes`, ou les PSR sont un
@@ -1326,17 +1363,19 @@ def extract_prelevements_sur_recettes_legifrance(
     Prelevements sur les recettes de l'Etat" (sous-categories "31."
     collectivites territoriales et "32." Union europeenne, codes de detail
     31xx/32xx) - memes lignes que celles exclues par
-    `normalize_recettes_legifrance_2026`, via le meme helper
-    `_etat_a_lignes_utiles`.
+    `normalize_recettes_legifrance`, via le meme helper
+    `_etat_a_lignes_utiles`. Meme parametre `unite_milliers` que celle-ci
+    (les PSR sont lus dans la meme table, donc soumis a la meme unite).
     """
+    multiplicateur = 1000.0 if unite_milliers else 1.0
     rows = parse_html_table_rows(etat_a_html)
     collectivites = 0.0
     union_europeenne = 0.0
     for code, montant in _etat_a_lignes_utiles(rows):
         if 3100 <= code < 3200:
-            collectivites += clean_montant(montant)
+            collectivites += clean_montant(montant) * multiplicateur
         elif 3200 <= code < 3300:
-            union_europeenne += clean_montant(montant)
+            union_europeenne += clean_montant(montant) * multiplicateur
     return PrelevementsSurRecettes(
         annee=annee, collectivites=collectivites, union_europeenne=union_europeenne
     )

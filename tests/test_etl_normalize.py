@@ -26,15 +26,15 @@ from api.etl.normalize import (
     normalize_depenses_2017,
     normalize_depenses_2018,
     normalize_depenses_2020,
-    normalize_depenses_2026,
     normalize_depenses_attachment_detaillee,
+    normalize_depenses_legifrance,
     normalize_depenses_records_json,
     normalize_mission_name,
     normalize_pib_complement_insee_premiere,
     normalize_pib_csv,
     normalize_population_xlsx,
     normalize_recettes_cour_des_comptes,
-    normalize_recettes_legifrance_2026,
+    normalize_recettes_legifrance,
     normalize_recettes_records_json,
     resolve_mission_identities,
 )
@@ -869,12 +869,12 @@ def test_normalize_population_xlsx_lit_l_onglet_fr() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_normalize_depenses_2026_mission_programme_par_align() -> None:
+def test_normalize_depenses_legifrance_2026_mission_programme_par_align() -> None:
     """`align` distingue Mission (center) de Programme (left): la fixture
     contient 2 missions, 6 lignes Programme (dont 3 "Dont titre 2" exclues).
     """
     etat_b_html = _load_html("lfi2026_etat_b_sample.html")
-    records = normalize_depenses_2026(etat_b_html, annee=2026)
+    records = normalize_depenses_legifrance(etat_b_html, annee=2026)
 
     assert len(records) == 6
     assert all(r.annee == 2026 for r in records)
@@ -888,13 +888,13 @@ def test_normalize_depenses_2026_mission_programme_par_align() -> None:
     }
 
 
-def test_normalize_depenses_2026_exclut_dont_titre_2_et_total() -> None:
+def test_normalize_depenses_legifrance_2026_exclut_dont_titre_2_et_total() -> None:
     """ "Dont titre 2" (memo deja inclus dans le total programme) et "Total"
     (cross-check uniquement) ne doivent jamais apparaitre comme lignes de
     depense - sous peine de doubler les montants.
     """
     etat_b_html = _load_html("lfi2026_etat_b_sample.html")
-    records = normalize_depenses_2026(etat_b_html, annee=2026)
+    records = normalize_depenses_legifrance(etat_b_html, annee=2026)
 
     assert all(r.programme_libelle not in ("Dont titre 2", "Total") for r in records)
 
@@ -907,7 +907,7 @@ def test_normalize_depenses_2026_exclut_dont_titre_2_et_total() -> None:
     assert sum(a.cp for a in aggregats) == pytest.approx(8535968788.0)
 
 
-def test_normalize_depenses_2026_action_synthetique_et_programme_code_hash() -> None:
+def test_normalize_depenses_legifrance_2026_action_synthetique_et_programme_code_hash() -> None:
     """Aucune decomposition par action dans cette source: une action
     synthetique unique est creee par programme (memes libelle/code que le
     programme). `programme_code` est un hash court (<=16 caracteres, tient
@@ -920,7 +920,7 @@ def test_normalize_depenses_2026_action_synthetique_et_programme_code_hash() -> 
     pour toutes les lignes).
     """
     etat_b_html = _load_html("lfi2026_etat_b_sample.html")
-    records = normalize_depenses_2026(etat_b_html, annee=2026)
+    records = normalize_depenses_legifrance(etat_b_html, annee=2026)
 
     codes = [r.programme_code for r in records]
     assert len(codes) == len(set(codes))  # tous distincts
@@ -930,7 +930,7 @@ def test_normalize_depenses_2026_action_synthetique_et_programme_code_hash() -> 
         assert r.action_libelle == r.programme_libelle
 
     # Determinisme: reparser la meme fixture doit produire les memes codes.
-    records_bis = normalize_depenses_2026(etat_b_html, annee=2026)
+    records_bis = normalize_depenses_legifrance(etat_b_html, annee=2026)
     assert [r.programme_code for r in records_bis] == codes
 
     aggregats = aggregate_depenses(records)
@@ -947,7 +947,7 @@ def test_normalize_recettes_legifrance_2026_mappe_accises_vers_ticpe() -> None:
     CODE_LIGNE_RECETTE_VERS_TYPE`).
     """
     etat_a_html = _load_html("lfi2026_etat_a_sample.html")
-    records = normalize_recettes_legifrance_2026(etat_a_html, annee=2026)
+    records = normalize_recettes_legifrance(etat_a_html, annee=2026)
 
     ticpe_total = sum(r.montant for r in records if r.type == TypeRecette.TICPE)
     assert ticpe_total == pytest.approx(17469533401.0 + 2226300000.0 + 5585300000.0 + 9000000.0)
@@ -961,7 +961,7 @@ def test_normalize_recettes_legifrance_2026_ignore_les_lignes_de_categorie() -> 
     ligne(s) de detail, sous peine de compter deux fois.
     """
     etat_a_html = _load_html("lfi2026_etat_a_sample.html")
-    records = normalize_recettes_legifrance_2026(etat_a_html, annee=2026)
+    records = normalize_recettes_legifrance(etat_a_html, annee=2026)
 
     ir_total = sum(r.montant for r in records if r.type == TypeRecette.IR)
     # Une seule ligne IR (code 1101) dans la fixture: si la ligne de
@@ -978,7 +978,7 @@ def test_normalize_recettes_legifrance_2026_categorie_sans_enfant_est_une_feuill
     code_ligne_recettes associe.
     """
     etat_a_html = _load_html("lfi2026_etat_a_sample.html")
-    records = normalize_recettes_legifrance_2026(etat_a_html, annee=2026)
+    records = normalize_recettes_legifrance(etat_a_html, annee=2026)
 
     autres_total = sum(r.montant for r in records if r.type == TypeRecette.AUTRES)
     # 2110 (1 257 454 531) + la categorie-feuille "18." (-10 461 709 884).
@@ -991,7 +991,7 @@ def test_normalize_recettes_legifrance_2026_exclut_les_lignes_psr() -> None:
     `extract_prelevements_sur_recettes_legifrance`.
     """
     etat_a_html = _load_html("lfi2026_etat_a_sample.html")
-    records = normalize_recettes_legifrance_2026(etat_a_html, annee=2026)
+    records = normalize_recettes_legifrance(etat_a_html, annee=2026)
 
     # 1101, 1301, 1501-1504, 1601, categorie-feuille 18, 2110 = 9 lignes;
     # aucune des 4 lignes PSR (31/3101/3106/32/3201... en realite 2 lignes
@@ -999,7 +999,7 @@ def test_normalize_recettes_legifrance_2026_exclut_les_lignes_psr() -> None:
     assert len(records) == 9
 
 
-def test_extract_prelevements_sur_recettes_legifrance_isole_collectivites_et_ue() -> None:
+def test_extract_prelevements_sur_recettes_legifrance_2026_isole_collectivites_et_ue() -> None:
     etat_a_html = _load_html("lfi2026_etat_a_sample.html")
     psr = extract_prelevements_sur_recettes_legifrance(etat_a_html, annee=2026)
 
@@ -1015,8 +1015,83 @@ def test_normalize_recettes_legifrance_2026_recettes_nettes_coherentes() -> None
     lignes.
     """
     etat_a_html = _load_html("lfi2026_etat_a_sample.html")
-    records = normalize_recettes_legifrance_2026(etat_a_html, annee=2026)
+    records = normalize_recettes_legifrance(etat_a_html, annee=2026)
     psr = extract_prelevements_sur_recettes_legifrance(etat_a_html, annee=2026)
 
     recettes_nettes = sum(r.montant for r in records) - psr.total
     assert recettes_nettes == pytest.approx(204092159647.0)
+
+
+# ---------------------------------------------------------------------------
+# LFI 2015/2021: memes normalizers Legifrance, reutilises pour combler les
+# trous du backfill historique (recettes 2015/2021, depenses 2015)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_recettes_legifrance_2015_convertit_milliers_en_euros() -> None:
+    """L'Etat A de la LFI 2015 est exprime en MILLIERS d'euros ("(En milliers
+    d'euros)", verifie dans l'en-tete de la table source) - `unite_milliers=
+    True` doit multiplier chaque montant par 1000. IR (ligne 1101) vaut
+    "75 305 000" milliers dans la fixture -> 75 305 000 000 EUR.
+    """
+    etat_a_html = _load_html("lfi2015_etat_a_sample.html")
+    records = normalize_recettes_legifrance(etat_a_html, annee=2015, unite_milliers=True)
+
+    ir_total = sum(r.montant for r in records if r.type == TypeRecette.IR)
+    assert ir_total == pytest.approx(75305000000.0)
+
+
+def test_normalize_recettes_legifrance_2015_sans_conversion_donne_des_milliers() -> None:
+    """Sans `unite_milliers=True` (comportement par defaut), les montants
+    restent tels quels dans la source - sous-evalues d'un facteur 1000 pour
+    2015. Ce test verifie explicitement que le defaut ne convertit PAS
+    (le mauvais defaut serait un bug silencieux beaucoup plus dangereux
+    qu'un oubli explicite de le passer).
+    """
+    etat_a_html = _load_html("lfi2015_etat_a_sample.html")
+    records = normalize_recettes_legifrance(etat_a_html, annee=2015)
+
+    ir_total = sum(r.montant for r in records if r.type == TypeRecette.IR)
+    assert ir_total == pytest.approx(75305000.0)
+
+
+def test_extract_prelevements_sur_recettes_legifrance_2015_convertit_milliers_en_euros() -> None:
+    etat_a_html = _load_html("lfi2015_etat_a_sample.html")
+    psr = extract_prelevements_sur_recettes_legifrance(etat_a_html, annee=2015, unite_milliers=True)
+
+    # 3101 (36 607 053) + 3103 (18 662) milliers -> EUR
+    assert psr.collectivites == pytest.approx((36607053.0 + 18662.0) * 1000)
+    assert psr.union_europeenne == pytest.approx(20742000.0 * 1000)
+
+
+def test_normalize_recettes_legifrance_2021_meme_structure_que_2026_sans_conversion() -> None:
+    """LFI 2021: meme structure qu'Etat A 2026, mais deja en euros (pas de
+    conversion necessaire, contrairement a 2015).
+    """
+    etat_a_html = _load_html("lfi2021_etat_a_sample.html")
+    records = normalize_recettes_legifrance(etat_a_html, annee=2021, unite_milliers=False)
+
+    par_type = {r.type: r.montant for r in records}
+    assert par_type[TypeRecette.IR] == pytest.approx(92835138856.0)
+    assert par_type[TypeRecette.IS] == pytest.approx(62984885027.0)
+    assert par_type[TypeRecette.TICPE] == pytest.approx(19194042064.0)
+    assert par_type[TypeRecette.TVA] == pytest.approx(145493491163.0)
+
+
+def test_normalize_depenses_legifrance_2015_exclut_dont_titre_2_et_totaux() -> None:
+    """Bug reel trouve a l'execution contre les vraies donnees 2015 (pas
+    detectable avec une fixture calquee sur le format 2026 seul): la ligne
+    de total final s'appelle "Totaux" (PLURIEL) pour la LFI 2015, pas
+    "Total" comme 2021/2026 - sans l'exclure aussi, elle est comptee comme
+    un programme normal et double le total (15 037 775 416 attendu contre
+    ~30 Md si la ligne "Totaux" de la fixture, qui vaut exactement le
+    total reel, etait comptee en plus).
+    """
+    etat_b_html = _load_html("lfi2015_etat_b_sample.html")
+    records = normalize_depenses_legifrance(etat_b_html, annee=2015)
+
+    assert all(r.programme_libelle not in ("Dont titre 2", "Totaux", "Total") for r in records)
+
+    aggregats = aggregate_depenses(records)
+    assert sum(a.ae for a in aggregats) == pytest.approx(15037775416.0)
+    assert sum(a.cp for a in aggregats) == pytest.approx(14325062285.0)
