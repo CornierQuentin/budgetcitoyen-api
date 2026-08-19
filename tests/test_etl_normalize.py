@@ -27,6 +27,7 @@ from api.etl.normalize import (
     normalize_depenses_2018,
     normalize_depenses_2020,
     normalize_depenses_attachment_detaillee,
+    normalize_depenses_fiscales_xlsx,
     normalize_depenses_legifrance,
     normalize_depenses_records_json,
     normalize_mission_name,
@@ -38,6 +39,7 @@ from api.etl.normalize import (
     normalize_recettes_records_json,
     resolve_mission_identities,
 )
+from api.models.depense_fiscale import StatutMontant
 from api.models.recette import TypeRecette
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -1095,3 +1097,66 @@ def test_normalize_depenses_legifrance_2015_exclut_dont_titre_2_et_totaux() -> N
     aggregats = aggregate_depenses(records)
     assert sum(a.ae for a in aggregats) == pytest.approx(15037775416.0)
     assert sum(a.cp for a in aggregats) == pytest.approx(14325062285.0)
+
+
+# ---------------------------------------------------------------------------
+# Depenses fiscales (niches fiscales), annexe "Voies et moyens" Tome II du PLF
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_depenses_fiscales_xlsx_lit_les_10_mesures_de_la_fixture() -> None:
+    """La fixture est un extrait REEL de 10 mesures (memes 4 feuilles/en-tetes
+    que le fichier source PLF2023, verifie a l'inspection directe du fichier
+    reel avant construction de la fixture) couvrant les 4 statuts de montant
+    et les 2 champs nullables (sous_sous_categorie, methode_chiffrage).
+    """
+    raw = _load_bytes("depenses_fiscales_2021_sample.xlsx")
+    records = normalize_depenses_fiscales_xlsx(raw, annee=2021)
+
+    assert len(records) == 10
+    assert all(r.annee == 2021 for r in records)
+    par_numero = {r.numero: r for r in records}
+
+    chiffre = par_numero["40107"]
+    assert chiffre.categorie == "Impôts locaux"
+    assert chiffre.sous_categorie == "Cotisation sur la valeur ajoutée des entreprises"
+    assert chiffre.sous_sous_categorie == "Exonérations compensées par l'Etat"
+    assert chiffre.beneficiaire == "Entreprises"
+    assert chiffre.statut_montant == StatutMontant.CHIFFRE
+    assert chiffre.montant_millions == pytest.approx(1.0)
+    assert chiffre.methode_chiffrage is not None
+
+    assert par_numero["40101"].statut_montant == StatutMontant.EPSILON
+    assert par_numero["40101"].montant_millions is None
+
+    assert par_numero["110267"].statut_montant == StatutMontant.AUCUN_EFFET
+    assert par_numero["110267"].montant_millions is None
+
+    assert par_numero["110307"].statut_montant == StatutMontant.NON_CALCULABLE
+    assert par_numero["110307"].montant_millions is None
+
+    # 320105/430101 n'ont pas de sous-sous-categorie dans la fixture (comme
+    # dans le fichier reel, 53/465 mesures dans ce cas) - jamais une chaine
+    # vide inventee.
+    assert par_numero["320105"].sous_sous_categorie is None
+
+    # 110268/110307 n'ont pas de methode de chiffrage renseignee dans la
+    # fixture (comme 85/465 mesures dans le fichier reel).
+    assert par_numero["110268"].methode_chiffrage is None
+
+
+def test_normalize_depenses_fiscales_xlsx_exclut_les_non_chiffrables_d_un_total_naif() -> None:
+    """Un total naif somme uniquement les statuts CHIFFRE: epsilon/nc/aucun
+    effet ne doivent jamais etre traites comme 0 (fausserait le total).
+    """
+    raw = _load_bytes("depenses_fiscales_2021_sample.xlsx")
+    records = normalize_depenses_fiscales_xlsx(raw, annee=2021)
+
+    chiffres = [r for r in records if r.statut_montant == StatutMontant.CHIFFRE]
+    non_chiffres = [r for r in records if r.statut_montant != StatutMontant.CHIFFRE]
+
+    assert len(chiffres) == 6
+    assert len(non_chiffres) == 4
+    assert all(r.montant_millions is None for r in non_chiffres)
+    total = sum(r.montant_millions for r in chiffres)
+    assert total == pytest.approx(118.0)

@@ -19,10 +19,17 @@ from sqlalchemy import delete, func, insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.etl.normalize import DepenseAggregat, MissionAliasRow, MissionYearRow, RecetteAggregat
+from api.etl.normalize import (
+    DepenseAggregat,
+    DepenseFiscaleRecord,
+    MissionAliasRow,
+    MissionYearRow,
+    RecetteAggregat,
+)
 from api.models.action import Action
 from api.models.annee_budget import AnneeBudget
 from api.models.depense import Depense
+from api.models.depense_fiscale import DepenseFiscale
 from api.models.indicateur_macro import IndicateurMacro
 from api.models.ingestion_log import IngestionLog
 from api.models.mission import Mission
@@ -493,6 +500,41 @@ async def upsert_indicateurs_macro(
     )
     await db.execute(stmt)
     logger.info("indicateurs_macro upsertes: %d", len(values))
+
+
+async def upsert_depenses_fiscales(
+    db: AsyncSession, annee: int, records: Sequence[DepenseFiscaleRecord]
+) -> int:
+    """Recharge les depenses fiscales d'une annee: delete puis reinsert.
+
+    Domaine independant (pas de FK vers mission/programme/action), un
+    `numero` de mesure suffit comme identifiant stable au sein d'une annee -
+    pas de resolution d'identite inter-annees necessaire (contrairement aux
+    missions). Retourne le nombre de lignes inserees.
+    """
+    await db.execute(delete(DepenseFiscale).where(DepenseFiscale.annee == annee))
+
+    if not records:
+        return 0
+
+    values = [
+        {
+            "annee": annee,
+            "numero": r.numero,
+            "categorie": r.categorie,
+            "sous_categorie": r.sous_categorie,
+            "sous_sous_categorie": r.sous_sous_categorie,
+            "libelle": r.libelle,
+            "beneficiaire": r.beneficiaire,
+            "montant_millions": r.montant_millions,
+            "statut_montant": r.statut_montant,
+            "methode_chiffrage": r.methode_chiffrage,
+        }
+        for r in records
+    ]
+    await db.execute(insert(DepenseFiscale), values)
+    logger.info("depenses_fiscales upsertees pour %d: %d lignes", annee, len(values))
+    return len(values)
 
 
 async def enregistrer_ingestion_terminee(db: AsyncSession) -> None:

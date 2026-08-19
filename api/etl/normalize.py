@@ -50,6 +50,7 @@ from typing import Any
 import pandas as pd
 
 from api.etl.sources import CODE_LIGNE_RECETTE_VERS_TYPE
+from api.models.depense_fiscale import StatutMontant
 from api.models.recette import TypeRecette
 
 logger = logging.getLogger(__name__)
@@ -159,6 +160,29 @@ class MissionAliasRow:
     annee_cible: int
     annee_debut: int
     annee_fin: int
+
+
+@dataclass(frozen=True)
+class DepenseFiscaleRecord:
+    """Une mesure de depense fiscale (niche fiscale), prete a l'upsert.
+
+    `categorie` est en realite le type d'impot concerne (ex: "Impot sur le
+    revenu", "Taxe sur la valeur ajoutee", "Impots locaux" - verifie a
+    l'inspection reelle de la feuille "Explication detaillee", 9 valeurs
+    distinctes), pas un regroupement thematique: la source n'expose aucune
+    colonne "impot concerne" separee de cette categorie de tete.
+    """
+
+    annee: int
+    numero: str
+    categorie: str
+    sous_categorie: str
+    sous_sous_categorie: str | None
+    libelle: str
+    beneficiaire: str
+    montant_millions: float | None
+    statut_montant: StatutMontant
+    methode_chiffrage: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -1790,3 +1814,92 @@ def normalize_population_xlsx(content: bytes) -> dict[int, int]:
         if isinstance(population_brute, int | float) and not pd.isna(population_brute):
             out[annee] = int(population_brute)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Depenses fiscales (niches fiscales), annexe "Voies et moyens" Tome II du PLF
+# ---------------------------------------------------------------------------
+
+# Jetons non numeriques observes dans les colonnes de montant (feuilles
+# "Chiffrages" et "Modalites de calcul de l'impot") - verifie a l'inspection
+# reelle du fichier source, aucun espace autour du tiret contrairement a ce
+# que la legende du fichier laisse penser ("aucun effet budgetaire").
+_STATUT_MONTANT_NON_CHIFFRE: dict[str, StatutMontant] = {
+    "-": StatutMontant.AUCUN_EFFET,
+    "ε": StatutMontant.EPSILON,
+    "nc": StatutMontant.NON_CALCULABLE,
+}
+
+
+def _parse_montant_depense_fiscale(cell: Any) -> tuple[float | None, StatutMontant]:
+    """Parse une cellule de montant (feuille "Chiffrages"): nombre ou statut.
+
+    Ne JAMAIS retourner 0.0 pour un jeton non numerique (`-`/`ε`/`nc`): ce
+    sont des statuts distincts d'un montant nul reel, cf. `StatutMontant`.
+    """
+    if isinstance(cell, int | float) and not pd.isna(cell):
+        return clean_montant(cell), StatutMontant.CHIFFRE
+    token = str(cell).strip()
+    if token in _STATUT_MONTANT_NON_CHIFFRE:
+        return None, _STATUT_MONTANT_NON_CHIFFRE[token]
+    raise ValueError(f"Jeton de montant depense fiscale non reconnu: {cell!r}")
+
+
+def normalize_depenses_fiscales_xlsx(content: bytes, annee: int) -> list[DepenseFiscaleRecord]:
+    """Normalise le xlsx "Voies et moyens" Tome II (voir `api.etl.sources.
+    DEPENSE_FISCALE_DATASET_ID`).
+
+    Le fichier eclate une seule liste logique de ~465 mesures sur plusieurs
+    feuilles distinctes (verifie a l'inspection reelle, non documente dans la
+    fiche dataset), toutes joignables par le "Numero" de mesure (cle stable,
+    aucun doublon ni ecart d'une feuille a l'autre verifie a l'execution):
+    "Explication detaillee" (categorie/sous-categorie/sous-sous-categorie/
+    libelle), "Chiffrages" (montants, 3 colonnes annee - voir
+    `api.etl.sources.DEPENSE_FISCALE_ANNEE` pour le choix de la colonne
+    retenue), "Beneficiaires" (colonne "Nature"), "Methodologie" (colonne
+    methode de chiffrage - en-tete fusionne sur 2 lignes source, "Methode"
+    puis "de chiffrage": la valeur utile finit nommee "de chiffrage" par
+    pandas, pas une erreur de lecture).
+
+    Chaque feuille a une mise en page a en-tetes fusionnes differente
+    (nombre de lignes de titre avant la ligne de colonnes propre variable
+    d'une feuille a l'autre): les `header=` ci-dessous sont donc chacun
+    specifiques a leur feuille, pas une convention uniforme du fichier.
+    """
+    explication = pd.read_excel(io.BytesIO(content), sheet_name="Explication détailléé", header=2)
+    chiffrages = pd.read_excel(io.BytesIO(content), sheet_name="Chiffrages", header=3)
+    beneficiaires = pd.read_excel(io.BytesIO(content), sheet_name="Bénéficiaires", header=1)
+    methodologie = pd.read_excel(io.BytesIO(content), sheet_name="Méthodologie", header=1)
+
+    montant_par_numero = {
+        int(row["Numero"]): _parse_montant_depense_fiscale(row[annee])
+        for _, row in chiffrages.iterrows()
+    }
+    beneficiaire_par_numero = {
+        int(row["Numéro"]): str(row["Nature"]) for _, row in beneficiaires.iterrows()
+    }
+    methode_par_numero = {int(row["Numéro"]): row.iloc[6] for _, row in methodologie.iterrows()}
+
+    records = []
+    for _, row in explication.iterrows():
+        numero = int(row["Numéro"])
+        montant_millions, statut_montant = montant_par_numero[numero]
+        sous_sous_categorie = row["Sous sous catégorie"]
+        methode_chiffrage = methode_par_numero[numero]
+        records.append(
+            DepenseFiscaleRecord(
+                annee=annee,
+                numero=str(numero),
+                categorie=str(row["Catégorie"]),
+                sous_categorie=str(row["Sous catégorie"]),
+                sous_sous_categorie=(
+                    None if pd.isna(sous_sous_categorie) else str(sous_sous_categorie)
+                ),
+                libelle=str(row["Libellé législatif"]),
+                beneficiaire=beneficiaire_par_numero[numero],
+                montant_millions=montant_millions,
+                statut_montant=statut_montant,
+                methode_chiffrage=(None if pd.isna(methode_chiffrage) else str(methode_chiffrage)),
+            )
+        )
+    return records
