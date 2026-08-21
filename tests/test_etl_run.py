@@ -631,10 +631,14 @@ async def test_charger_recettes_legifrance_enchaine_fetch_normalize_et_load(
     )
 
     async with httpx.AsyncClient() as client:
-        psr_par_annee = await run._charger_recettes_legifrance(db_session, client, [annee])
+        psr_par_annee, remboursements = await run._charger_recettes_legifrance(
+            db_session, client, [annee]
+        )
     await db_session.commit()
 
     assert psr_par_annee == {annee: 7.0}
+    # Aucun rattrapage pour cette annee (pas de mission RD seedee).
+    assert remboursements == {}
     recette = (
         await db_session.execute(
             select(Recette).where(Recette.annee == annee, Recette.type == TypeRecette.TICPE)
@@ -760,15 +764,20 @@ async def test_charger_recettes_legifrance_regrossit_avec_remboursements_et_degr
     )
 
     async with httpx.AsyncClient() as client:
-        await run._charger_recettes_legifrance(db_session, client, [annee])
+        _psr, remboursements = await run._charger_recettes_legifrance(db_session, client, [annee])
     await db_session.commit()
 
+    # Le rattrapage est RETOURNE pour etre ajoute au total de l'annee...
+    assert remboursements[annee] == pytest.approx(141174362742.0)
+    # ...et n'entre PAS dans la table `recette`: ce n'est pas une recette, et
+    # l'y ranger faussait le type AUTRES, publie tel quel dans le camembert du
+    # tableau de bord (141 Md EUR sur 247, soit pres de la moitie).
     autres = (
         await db_session.execute(
             select(Recette).where(Recette.annee == annee, Recette.type == TypeRecette.AUTRES)
         )
-    ).scalar_one()
-    assert autres.montant_net == pytest.approx(141174362742.0)
+    ).scalar_one_or_none()
+    assert autres is None
 
 
 async def test_charger_recettes_legifrance_2015_n_applique_aucun_rattrapage(
@@ -1065,7 +1074,8 @@ def _patch_chargeurs(monkeypatch: pytest.MonkeyPatch, appels: list[str]) -> None
 
     async def _fake_charger_recettes_legifrance(db, client, annees):
         appels.append("recettes_legifrance")
-        return {}
+        # Deux mappings desormais: PSR (a retrancher) et rattrapage (a ajouter).
+        return {}, {}
 
     async def _fake_charger_indicateurs(db, client):
         appels.append("indicateurs")
@@ -1097,7 +1107,7 @@ async def test_run_etl_appelle_toutes_les_etapes_demandees(
     _patch_chargeurs(monkeypatch, appels)
     recalculs: list[int] = []
 
-    async def _fake_recalculer(db, annee, source_url, psr=0.0):
+    async def _fake_recalculer(db, annee, source_url, psr=0.0, remboursements=0.0):
         recalculs.append(annee)
         return None
 

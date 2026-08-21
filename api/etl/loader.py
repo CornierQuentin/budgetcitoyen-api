@@ -364,6 +364,7 @@ async def recalculer_annee_budget(
     annee: int,
     source_url: str,
     prelevements_sur_recettes: float = 0.0,
+    remboursements_impots_etat: float = 0.0,
 ) -> AnneeBudget | None:
     """Recalcule l'agregat AnneeBudget d'une annee, si depenses ET recettes existent.
 
@@ -372,6 +373,16 @@ async def recalculer_annee_budget(
       (types IR/TVA/IS/TICPE/AUTRES, deja limites aux "Recettes fiscales" et
       "Recettes non fiscales" par `normalize.normalize_recettes_records_json`
       - voir sa docstring), MOINS `prelevements_sur_recettes`.
+    - `remboursements_impots_etat`: rattrapage brut/net, AJOUTE aux recettes
+      (symetrique du PSR, qui en est retranche). Certaines annees expriment
+      Etat A en montants NETS de remboursements ("Impot NET sur le revenu"),
+      alors que les depenses comparees sont brutes: sans ce rattrapage, le
+      deficit calcule ne retombe pas sur le solde de l'article d'equilibre
+      officiel. Fourni par l'appelant (cf. `api.etl.run.
+      _charger_recettes_legifrance`) plutot que stocke dans `recette`: ce
+      n'est PAS une recette, et l'y ranger faussait le type AUTRES, qui est
+      publie tel quel (camembert du tableau de bord). Vaut 0.0 par defaut,
+      aucun rattrapage n'etant necessaire pour la plupart des annees.
     - `prelevements_sur_recettes` (PSR): total des lignes source
       "Prelevement(s) sur les recettes de l'Etat au profit des collectivites
       territoriales / de l'Union europeenne" de l'annee, calcule en amont par
@@ -421,9 +432,10 @@ async def recalculer_annee_budget(
         )
     )
     # Methodologie du tableau d'equilibre officiel du budget de l'Etat:
-    # recettes_nettes = (recettes fiscales + non fiscales) - PSR (voir
-    # docstring ci-dessus et `normalize.PrelevementsSurRecettes`).
-    recettes_total = recettes_brutes - prelevements_sur_recettes
+    # recettes_nettes = (recettes fiscales + non fiscales)
+    #                   + remboursements d'impots d'Etat - PSR
+    # (voir docstring ci-dessus et `normalize.PrelevementsSurRecettes`).
+    recettes_total = recettes_brutes + remboursements_impots_etat - prelevements_sur_recettes
     deficit = depenses_total - recettes_total
 
     stmt = pg_insert(AnneeBudget).values(

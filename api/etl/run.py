@@ -419,7 +419,7 @@ async def _charger_recettes(
 
 async def _charger_recettes_legifrance(
     db: AsyncSession, client: httpx.AsyncClient, annees: list[int]
-) -> dict[int, float]:
+) -> tuple[dict[int, float], dict[int, float]]:
     """Telecharge, normalise et charge les recettes 2015/2021/2026 (API Legifrance/PISTE).
 
     Troisieme source de recettes (aux cotes de `_charger_recettes` -
@@ -466,11 +466,15 @@ async def _charger_recettes_legifrance(
       -172,4 Md EUR - dans les deux cas, seule la comparaison directe a
       l'article d'equilibre officiel de CHAQUE annee a revele l'erreur.
 
-    Retourne le mapping {annee: total PSR en EUROS}, comme `_charger_
-    recettes`/`_charger_recettes_cour_des_comptes`.
+    Retourne DEUX mappings {annee: montant en EUROS}: les PSR (a retrancher,
+    comme `_charger_recettes`/`_charger_recettes_cour_des_comptes`) et les
+    rattrapages brut/net (a ajouter). Les seconds ne transitent pas par la
+    table `recette`: ce ne sont pas des recettes, et les y ranger faussait le
+    type AUTRES, publie tel quel dans le camembert du tableau de bord.
     """
     tous_les_aggregats: list[normalize.RecetteAggregat] = []
     psr_par_annee: dict[int, float] = {}
+    remboursements_par_annee: dict[int, float] = {}
     for annee in annees:
         text_cid = sources.LFI_TEXT_CID_PAR_ANNEE[annee]
         jorf = await _fetch_lfi_jorf(client, text_cid)
@@ -484,15 +488,12 @@ async def _charger_recettes_legifrance(
         if annee in sources.LFI_REMBOURSEMENTS_IMPOTS_ETAT_SEUL:
             rd_cp = await loader.get_remboursements_degrevements_impots_etat_cp(db, annee)
             if rd_cp:
-                records = [
-                    *records,
-                    normalize.RecetteRecord(annee=annee, type=TypeRecette.AUTRES, montant=rd_cp),
-                ]
+                remboursements_par_annee[annee] = rd_cp
                 logger.info(
-                    "annee %d (Legifrance/PISTE): +%.1f Md EUR ajoutes a AUTRES (programme "
-                    "'impots d'Etat' de 'Remboursements et degrevements' deja charge comme "
-                    "depense - rattrapage brut/net, cf. loader."
-                    "get_remboursements_degrevements_impots_etat_cp)",
+                    "annee %d (Legifrance/PISTE): rattrapage brut/net de %.1f Md EUR "
+                    "(programme 'impots d'Etat' de 'Remboursements et degrevements'), "
+                    "ajoute au TOTAL de l'annee et non a la table `recette` - ce n'est "
+                    "pas une recette, cf. loader.recalculer_annee_budget",
                     annee,
                     rd_cp / 1e9,
                 )
@@ -519,7 +520,7 @@ async def _charger_recettes_legifrance(
             psr.union_europeenne / 1e9,
         )
     await loader.upsert_recettes(db, tous_les_aggregats)
-    return psr_par_annee
+    return psr_par_annee, remboursements_par_annee
 
 
 def _decode_zip_member(data: bytes) -> str:
@@ -821,6 +822,10 @@ async def run_etl(
 
     source_url_par_annee: dict[int, str] = {}
     psr_par_annee: dict[int, float] = {}
+    # Rattrapage brut/net par annee, AJOUTE au total (symetrique du PSR, qui en
+    # est retranche). Volontairement hors de la table `recette`: ce n'est pas
+    # une recette, et l'y ranger faussait le type AUTRES publie tel quel.
+    remboursements_par_annee: dict[int, float] = {}
 
     # follow_redirects=True: les ressources data.gouv.fr (PIB nominal) sont
     # exposees via une URL stable qui redirige (302) vers l'hebergement
@@ -841,9 +846,11 @@ async def run_etl(
                     await _charger_recettes_cour_des_comptes(db, client, recettes_annees_ccomptes)
                 )
             if recettes_annees_legifrance:
-                psr_par_annee.update(
-                    await _charger_recettes_legifrance(db, client, recettes_annees_legifrance)
+                psr_legifrance, remboursements = await _charger_recettes_legifrance(
+                    db, client, recettes_annees_legifrance
                 )
+                psr_par_annee.update(psr_legifrance)
+                remboursements_par_annee.update(remboursements)
             if indicateurs:
                 await _charger_indicateurs(db, client)
             if depenses_fiscales:
@@ -881,7 +888,11 @@ async def run_etl(
                     if source_url is None:
                         continue
                     await loader.recalculer_annee_budget(
-                        db, annee, source_url, psr_par_annee.get(annee, 0.0)
+                        db,
+                        annee,
+                        source_url,
+                        psr_par_annee.get(annee, 0.0),
+                        remboursements_par_annee.get(annee, 0.0),
                     )
 
             await loader.enregistrer_ingestion_terminee(db)

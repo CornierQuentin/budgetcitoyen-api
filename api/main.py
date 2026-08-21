@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -50,6 +51,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Compression des reponses JSON. Le catalogue des missions toutes annees
+    # confondues, qu'utilise le selecteur de la page Historique, pese ~90 Ko
+    # non compresse pour ~8 Ko compresse: du JSON tabulaire et repetitif est
+    # exactement ce que gzip reduit le mieux. `minimum_size` evite de
+    # compresser les petites reponses, ou l'en-tete couterait plus que le gain.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     app.add_exception_handler(
         ProblemDetailException, problem_detail_exception_handler  # type: ignore[arg-type]
