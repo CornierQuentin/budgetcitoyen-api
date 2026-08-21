@@ -244,6 +244,14 @@ DEPENSES_ANNEES: tuple[int, ...] = (
 # place - le dispatch de `api.etl.run._fetch_depenses_annee` route 2021 vers
 # cette branche AVANT d'atteindre celle-ci, aucun conflit).
 LFI_TEXT_CID_PAR_ANNEE: dict[int, str] = {
+    # 2012-2014: recettes seulement (les depenses de ces annees viennent de
+    # data.economie, cf. les branches dediees de `_fetch_depenses_annee`, qui
+    # precedent celle-ci). Ajoutees pour combler le seul trou qui empechait
+    # `annee_budget` d'exister avant 2015: leurs depenses etaient deja en
+    # base, leurs recettes manquaient, donc aucun solde n'etait calculable.
+    2012: "JORFTEXT000025044460",  # LOI n° 2011-1977 du 28 decembre 2011
+    2013: "JORFTEXT000026856853",  # LOI n° 2012-1509 du 29 decembre 2012
+    2014: "JORFTEXT000028399511",  # LOI n° 2013-1278 du 29 decembre 2013
     2015: "JORFTEXT000029988857",  # LOI n° 2014-1654 du 29 decembre 2014
     2021: "JORFTEXT000042753580",  # LOI n° 2020-1721 du 29 decembre 2020 (recettes seulement)
     2026: "JORFTEXT000053508155",  # LOI n° 2026-103 du 19 fevrier 2026
@@ -263,7 +271,21 @@ RECETTES_LEGIFRANCE_ANNEES: tuple[int, ...] = tuple(sorted(LFI_TEXT_CID_PAR_ANNE
 # multiplicateur ne doit donc JAMAIS s'appliquer aux depenses, uniquement
 # aux recettes/PSR d'Etat A. A revalider explicitement (pas a supposer) pour
 # toute annee future ajoutee a cette source.
-LFI_ETAT_A_MILLIERS_EUROS: tuple[int, ...] = (2015,)
+#
+# 2012-2014 revalides explicitement (et non supposes par ressemblance avec
+# 2015): leur en-tete ne porte AUCUNE mention d'unite, contrairement a 2015.
+# L'unite a donc ete etablie par le resultat - sans le multiplicateur, les
+# recettes nettes tombaient a ~0,3 Md EUR au lieu de ~300. Confirmation par
+# le tableau d'equilibre de chaque loi: le solde du BUDGET GENERAL calcule
+# (depenses en base moins recettes d'Etat A hors PSR) retombe a moins de
+# 0,3 M EUR pres sur la ligne "Montants nets pour le budget general" de son
+# propre article d'equilibre - 74 367 / 62 624 / 81 558 M EUR.
+#
+# Piege de reference: ne PAS comparer au "Solde general" du meme tableau, qui
+# inclut budgets annexes et comptes speciaux (hors perimetre de ce projet) -
+# il vaut -78 712 M EUR pour 2012 la ou le budget general seul fait -74 367,
+# et l'ecart de 4,3 Md aurait fait conclure a tort a un rattrapage manquant.
+LFI_ETAT_A_MILLIERS_EUROS: tuple[int, ...] = (2012, 2013, 2014, 2015)
 
 # Annees Legifrance necessitant un rattrapage brut/net cote recettes
 # (`api.etl.run._charger_recettes_legifrance`), limite au seul programme
