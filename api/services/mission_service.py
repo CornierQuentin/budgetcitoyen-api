@@ -68,6 +68,52 @@ async def obtenir_mission(db: AsyncSession, slug: str, annee: int | None) -> tup
     return mission, montant_total
 
 
+# Longueur exacte de la cle synthetique fabriquee par
+# `api.etl.normalize.normalize_depenses_legifrance`
+# (`hashlib.sha256(...).hexdigest()[:16]`).
+_LONGUEUR_CLE_SYNTHETIQUE = 16
+
+
+def _code_est_officiel(code: str) -> bool:
+    """Dit si `code` est un numero de programme publie, ou une cle interne.
+
+    L'annexe "Etat B" de la LFI publiee au Journal officiel (source des
+    annees Legifrance, 2015 et 2026) ne donne PAS les numeros de programme:
+    `normalize_depenses_legifrance` fabrique alors une cle stable
+    `sha256(mission::programme)[:16]`. Toutes les autres annees viennent de
+    data.economie et portent le vrai numero ("101", "144"...).
+
+    La regle vit ici, cote serveur, et pas dans chaque client: elle appartient
+    a l'ETL, et la faire redeviner ailleurs la separerait de son origine.
+
+    Longueur ET jeu de caracteres, plutot que `code.isdigit()`: un hachage
+    entierement numerique existe (environ 1 sur 1 300), et sur les ~260
+    programmes concernes il s'en presenterait tot ou tard un qui passerait
+    pour officiel.
+    """
+    if len(code) != _LONGUEUR_CLE_SYNTHETIQUE:
+        return True
+    try:
+        int(code, 16)
+    except ValueError:
+        return True
+    return False
+
+
+def _actions_sont_detaillees(code_programme: str, actions: list[ActionDetailItem]) -> bool:
+    """Dit si les actions d'un programme sont reelles, ou une seule de remplissage.
+
+    Meme source, meme limite: faute de granularite plus fine, l'ETL cree UNE
+    action synthetique par programme, qui en reprend le code et le libelle.
+    Une telle "action" ne dit rien de plus que le programme au-dessus d'elle.
+
+    Test STRUCTUREL et non de format: il reproduit exactement la construction
+    du normalizer (`action_code=programme_code`), donc il reste juste meme si
+    le format des cles changeait un jour.
+    """
+    return not (len(actions) == 1 and actions[0].code == code_programme)
+
+
 async def obtenir_mission_detail(
     db: AsyncSession, slug: str, annee: int | None
 ) -> MissionDetailResponse:
@@ -146,6 +192,10 @@ async def obtenir_mission_detail(
             nom=programmes_actions[prog_id][1],
             montant_total=sum(a.cp for a in programmes_actions[prog_id][2]),
             actions=programmes_actions[prog_id][2],
+            code_officiel=_code_est_officiel(programmes_actions[prog_id][0]),
+            actions_detaillees=_actions_sont_detaillees(
+                programmes_actions[prog_id][0], programmes_actions[prog_id][2]
+            ),
         )
         for prog_id in ordre_programmes
     ]

@@ -58,6 +58,18 @@ class ProgrammeDetailItem(BaseModel):
     nom: str
     montant_total: float  # somme des cp de ses actions
     actions: list[ActionDetailItem]
+    # Deux drapeaux qui disent ce que la SOURCE de l'annee fournit reellement,
+    # pour qu'un client n'ait pas a redeviner les conventions de l'ETL (voir
+    # `api.services.mission_service.obtenir_mission_detail`, qui les calcule,
+    # et `api.etl.normalize.normalize_depenses_legifrance`, qui cree les cas
+    # ou ils valent False).
+    #
+    # `code` reste renvoye tel quel dans les deux cas: c'est bien la cle qui
+    # identifie le programme en base, et un client qui la veut doit pouvoir
+    # l'obtenir. Ces drapeaux disent seulement s'il est publiable comme une
+    # information budgetaire.
+    code_officiel: bool
+    actions_detaillees: bool
 
 
 class MissionDetailResponse(BaseModel):

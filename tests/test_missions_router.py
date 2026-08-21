@@ -1,5 +1,7 @@
 """Tests du router /api/v1/missions."""
 
+import hashlib
+
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -122,6 +124,9 @@ async def test_detail_mission_retourne_decomposition_programmes_actions(
 
     programme_1 = next(p for p in body["programmes"] if p["code"] == "JA-P1")
     assert programme_1["montant_total"] == 150.0
+    # Codes lisibles et plusieurs actions distinctes: rien de synthetique ici.
+    assert programme_1["code_officiel"] is True
+    assert programme_1["actions_detaillees"] is True
     assert len(programme_1["actions"]) == 2
     codes_actions_p1 = {a["code"] for a in programme_1["actions"]}
     assert codes_actions_p1 == {"JA-A1", "JA-A2"}
@@ -145,6 +150,71 @@ async def test_detail_mission_sans_annee_utilise_la_derniere_disponible(
     body = response.json()
     assert body["annee"] == ANNEE_REFERENCE
     assert body["montant_total"] == 180.0
+
+
+async def _seed_mission_annee_legifrance(db_session: AsyncSession) -> None:
+    """Seede une mission telle que l'ETL la produit pour une annee Legifrance.
+
+    Reproduit exactement `normalize_depenses_legifrance`: le code programme
+    est une cle `sha256(mission::programme)[:16]`, et l'unique action reprend
+    ce meme code et ce meme libelle, faute de granularite plus fine dans
+    l'annexe "Etat B" publiee au Journal officiel.
+    """
+    cle = hashlib.sha256(b"Defense::Equipement des forces").hexdigest()[:16]
+
+    mission = Mission(
+        slug="defense",
+        nom_normalise="defense",
+        nom_officiel="Defense",
+        annee=2026,
+        code_mission=None,
+    )
+    db_session.add(mission)
+    await db_session.flush()
+
+    programme = Programme(mission_id=mission.id, code=cle, nom="Equipement des forces", annee=2026)
+    db_session.add(programme)
+    await db_session.flush()
+
+    action = Action(programme_id=programme.id, code=cle, nom="Equipement des forces", annee=2026)
+    db_session.add(action)
+    await db_session.flush()
+
+    db_session.add(Depense(action_id=action.id, ae=200.0, cp=180.0, annee=2026))
+    await db_session.commit()
+
+
+async def test_detail_mission_signale_un_code_programme_synthetique(
+    async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Une cle interne ne doit pas pouvoir passer pour un numero de programme."""
+    await _seed_mission_annee_legifrance(db_session)
+
+    response = await async_client.get("/api/v1/missions/defense/detail", params={"annee": 2026})
+
+    assert response.status_code == 200
+    programme = response.json()["programmes"][0]
+
+    # La cle reste renvoyee - c'est bien l'identifiant en base - mais elle est
+    # signalee comme non publiable.
+    assert len(programme["code"]) == 16
+    assert programme["code_officiel"] is False
+    # L'unique action reprend le code du programme: elle n'apporte rien.
+    assert programme["actions_detaillees"] is False
+
+
+async def test_detail_mission_ne_confond_pas_un_code_court_avec_une_cle(
+    async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Garde-fou sur la regle de longueur: "144" n'est pas une cle synthetique."""
+    await _seed_mission_justice(db_session)
+
+    response = await async_client.get(
+        "/api/v1/missions/justice/detail", params={"annee": ANNEE_REFERENCE}
+    )
+
+    assert response.status_code == 200
+    assert all(p["code_officiel"] is True for p in response.json()["programmes"])
 
 
 async def test_detail_mission_inexistante_retourne_404_rfc7807(async_client: AsyncClient) -> None:
