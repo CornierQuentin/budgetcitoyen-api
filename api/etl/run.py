@@ -315,6 +315,16 @@ async def _fetch_depenses_annee(
         text = await _fetch_attachment_text(client, dataset_id, attachment_id)
         records = normalize.normalize_depenses_attachment_detaillee(text, annee)
         source_url = sources.attachment_url(dataset_id, attachment_id)
+    elif annee in sources.DEPENSES_LFI_XLS_PAR_ANNEE:
+        # Fichier exploitable du ministere plutot que l'Etat B du Journal
+        # officiel: meme loi, memes montants a l'euro pres, mais avec les
+        # NUMEROS de programme et la ventilation par ACTION que l'Etat B ne
+        # publie pas (cf. `sources.DEPENSES_LFI_XLS_PAR_ANNEE`). `source_url`
+        # continue de pointer sur Legifrance: c'est le texte qui ETABLIT ces
+        # montants, le fichier n'en est que le rendu chiffre.
+        chemin = sources.depenses_lfi_xls_path(annee)
+        records = normalize.normalize_depenses_lfi_xls(chemin.read_bytes(), annee)
+        source_url = sources.legifrance_url(sources.LFI_TEXT_CID_PAR_ANNEE[annee])
     elif annee in sources.LFI_TEXT_CID_PAR_ANNEE:
         text_cid = sources.LFI_TEXT_CID_PAR_ANNEE[annee]
         jorf = await _fetch_lfi_jorf(client, text_cid)

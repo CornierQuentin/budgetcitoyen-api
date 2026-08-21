@@ -111,6 +111,8 @@ fournit aucun dataset exploitable pour ces 2 millesimes.
   `unite_milliers` des 2 fonctions ci-dessus.
 """
 
+from pathlib import Path
+
 from api.core.config import get_settings
 
 settings = get_settings()
@@ -322,6 +324,40 @@ CODE_LIGNE_RECETTE_VERS_TYPE: dict[float, str] = {
     1503.0: "TICPE",
     1504.0: "TICPE",
 }
+
+# --------------------------------------------------------------------------
+# Depenses 2026: fichier "LFI 2026 - Credits AE et CP votes" du ministere.
+#
+# L'annexe "Etat B" de la LFI publiee au Journal officiel s'arrete au
+# PROGRAMME et ne donne meme pas son numero (cf. `normalize_depenses_
+# legifrance`, qui doit fabriquer une cle de hachage). Le ministere publie
+# separement la meme loi sous forme exploitable, avec numeros de programme et
+# ventilation par action - c'est ce fichier.
+#
+# Somme des CP du budget general verifiee EGALE A L'EURO PRES au total tire de
+# l'Etat B (593 890 071 649 EUR), ce qui confirme qu'il s'agit bien du meme
+# texte vote et non du projet: le fichier PLF equivalent, lui, totalise
+# 588,26 Md EUR (ecart des amendements parlementaires).
+#
+# Fichier VERSIONNE dans le depot plutot que telecharge a chaque run: le site
+# du ministere est protege par un pare-feu applicatif qui renvoie une page
+# anti-robot (212 octets de HTML) a tout client automatique, et contourner
+# cette protection n'est pas une option. Ce n'est pas un risque de peremption:
+# une loi de finances INITIALE est un texte definitif, son rendu chiffre ne
+# change plus. Un nouvel exercice demandera le meme geste manuel, documente
+# ici.
+#
+# Provenance: https://www.budget.gouv.fr/documentation/documents-budgetaires
+# -lois/exercice-2026/loi-finances-initiale-2026-lfi (publie le 03/03/2026).
+DEPENSES_LFI_XLS_PAR_ANNEE: dict[int, str] = {
+    2026: "lfi_2026_credits_ae_cp_votes.xls",
+}
+
+
+def depenses_lfi_xls_path(annee: int) -> Path:
+    """Chemin du fichier LFI exploitable embarque pour `annee`."""
+    return Path(__file__).parent / "data" / DEPENSES_LFI_XLS_PAR_ANNEE[annee]
+
 
 # --------------------------------------------------------------------------
 # Recettes 2016-2020/2022/2023: rapports annuels "Le budget de l'Etat en

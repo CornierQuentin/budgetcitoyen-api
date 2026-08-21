@@ -373,6 +373,45 @@ async def test_fetch_depenses_annee_json_records(monkeypatch: pytest.MonkeyPatch
     assert source_url == sources.records_url(sources.DEPENSES_DATASETS_RECORDS[annee])
 
 
+async def test_fetch_depenses_annee_2026_lit_le_fichier_lfi_embarque(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026 passe par le fichier LFI du ministere, PAS par l'Etat B Legifrance.
+
+    L'Etat B du Journal officiel s'arrete au programme et n'en donne meme pas
+    le numero; le fichier du ministere porte la meme loi avec les numeros et
+    la ventilation par action. Ce test verifie que 2026 est bien route vers
+    lui — et qu'aucun appel reseau n'est tente, le fichier etant embarque.
+    """
+    sentinel = [object()]
+    appels_reseau: list[str] = []
+
+    async def _interdit(*_args: object, **_kwargs: object) -> dict:
+        appels_reseau.append("jorf")
+        raise AssertionError("2026 ne doit plus appeler Legifrance pour les depenses")
+
+    monkeypatch.setattr(run, "_fetch_lfi_jorf", _interdit)
+    monkeypatch.setattr(normalize, "normalize_depenses_lfi_xls", lambda contenu, a: sentinel)
+
+    async with httpx.AsyncClient() as client:
+        records, source_url = await run._fetch_depenses_annee(client, 2026)
+
+    assert records is sentinel
+    assert appels_reseau == []
+    # La source citee reste le texte de loi: le fichier n'en est que le rendu
+    # chiffre, ce n'est pas lui qui etablit les montants.
+    assert source_url == sources.legifrance_url(sources.LFI_TEXT_CID_PAR_ANNEE[2026])
+
+
+async def test_fichier_lfi_embarque_est_bien_present() -> None:
+    """Le fichier est versionne: son absence casserait l'ETL a l'execution
+    seulement, bien apres le merge."""
+    for annee in sources.DEPENSES_LFI_XLS_PAR_ANNEE:
+        chemin = sources.depenses_lfi_xls_path(annee)
+        assert chemin.is_file(), f"fichier LFI manquant pour {annee}: {chemin}"
+        assert chemin.stat().st_size > 100_000
+
+
 async def test_fetch_depenses_annee_2012_cas_special_trois_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -459,28 +498,13 @@ async def test_fetch_depenses_annee_2021_2022_branche_partagee(
     assert records_2022 is sentinel
 
 
-async def test_fetch_depenses_annee_2026_cas_legifrance(monkeypatch: pytest.MonkeyPatch) -> None:
-    sentinel = [object()]
-    text_cid = sources.LFI_TEXT_CID_PAR_ANNEE[2026]
-
-    async def _fake_fetch_lfi_jorf(_client: httpx.AsyncClient, cid: str) -> dict:
-        assert cid == text_cid
-        return {"fake": "jorf"}
-
-    monkeypatch.setattr(run, "_fetch_lfi_jorf", _fake_fetch_lfi_jorf)
-    monkeypatch.setattr(run, "_extract_etats_html", lambda jorf: ("etat-a", "etat-b"))
-    monkeypatch.setattr(normalize, "normalize_depenses_legifrance", lambda etat_b, a: sentinel)
-
-    async with httpx.AsyncClient() as client:
-        records, source_url = await run._fetch_depenses_annee(client, 2026)
-
-    assert records is sentinel
-    assert source_url == sources.legifrance_url(text_cid)
-
-
 async def test_fetch_depenses_annee_2015_cas_legifrance(monkeypatch: pytest.MonkeyPatch) -> None:
-    """2015 comble un trou reel du backfill historique via la meme source
-    Legifrance que 2026 (meme branche de dispatch, meme normalizer)."""
+    """2015 comble un trou reel du backfill historique via l'Etat B Legifrance.
+
+    Seule annee restee sur cette branche depuis que 2026 lit le fichier LFI
+    exploitable du ministere: aucun equivalent n'existe pour 2015, dont le
+    detail par action demeure donc indisponible.
+    """
     sentinel = [object()]
     text_cid = sources.LFI_TEXT_CID_PAR_ANNEE[2015]
 

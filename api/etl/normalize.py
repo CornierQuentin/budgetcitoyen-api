@@ -1034,6 +1034,83 @@ def normalize_depenses_attachment_detaillee(csv_text: str, annee: int) -> list[D
     return out
 
 
+# Motifs des colonnes de montants VOTES du fichier LFI du ministere. Reperees
+# par motif et non par nom exact: le nom embarque l'annee et comporte une
+# double espace ("CP (T2 + Hors T2) LFI  2026"), deux details qu'un futur
+# millesime pourrait changer sans prevenir.
+_RE_COLONNE_AE_LFI = re.compile(r"^AE \(T2 \+ Hors T2\) LFI\s+\d{4}$")
+_RE_COLONNE_CP_LFI = re.compile(r"^CP \(T2 \+ Hors T2\) LFI\s+\d{4}$")
+
+
+def _colonne_par_motif(colonnes: list[str], motif: re.Pattern[str], annee: int) -> str:
+    """Retourne l'unique colonne correspondant a `motif`, ou leve ValueError.
+
+    Leve plutot que de retomber sur une colonne voisine: une erreur de colonne
+    de montant serait invisible a la lecture et fausserait toute une annee.
+    """
+    trouvees = [c for c in colonnes if motif.match(str(c))]
+    if len(trouvees) != 1:
+        raise ValueError(
+            f"annee {annee}: {len(trouvees)} colonne(s) pour {motif.pattern!r} "
+            f"(attendu exactement 1) - structure du fichier LFI a peut-etre change"
+        )
+    return trouvees[0]
+
+
+def normalize_depenses_lfi_xls(content: bytes, annee: int) -> list[DepenseRecord]:
+    """Normalise le fichier "LFI <annee> - Credits AE et CP votes" du ministere.
+
+    Seule source connue donnant, pour les annees ou l'Etat B du Journal
+    officiel s'arrete au programme (2026), les NUMEROS de programme et la
+    ventilation par ACTION. Voir `api.etl.sources.DEPENSES_LFI_XLS_PAR_ANNEE`
+    pour la provenance et la raison du versionnement dans le depot.
+
+    Colonnes retenues: `Mission`/`Code Mission`, `Programme`/`Libelle
+    Programme`, `Action`/`Libelle Action`, et les montants VOTES
+    ("(T2 + Hors T2) LFI"), pas ceux du PLF ni des amendements que le meme
+    fichier expose en colonnes voisines - confondre les trois donnerait un
+    total plausible mais faux.
+
+    Filtre `Type Mission == "BG"`: budget general seul, comme TOUTE la serie
+    deja en base (budgets annexes et comptes speciaux hors perimetre - cf.
+    JOURNAL, chantier 2016-2017 ou les melanger avait ete explicitement
+    ecarte).
+
+    Le fichier descend jusqu'a la sous-action; les lignes d'une meme action
+    sont laissees telles quelles et sommees en aval par `aggregate_depenses`,
+    qui agrege deja par triplet (mission, programme, action).
+
+    Code d'action au format "<programme>-<action sur 2 chiffres>" ("178-03"),
+    identique a celui des autres annees pour que la nomenclature reste
+    comparable d'un exercice a l'autre.
+    """
+    df = pd.read_excel(io.BytesIO(content))
+    colonnes = [str(c) for c in df.columns]
+    col_ae = _colonne_par_motif(colonnes, _RE_COLONNE_AE_LFI, annee)
+    col_cp = _colonne_par_motif(colonnes, _RE_COLONNE_CP_LFI, annee)
+
+    budget_general = df[df["Type Mission"] == "BG"]
+
+    out: list[DepenseRecord] = []
+    for _, row in budget_general.iterrows():
+        programme = int(row["Programme"])
+        action = int(row["Action"])
+        out.append(
+            DepenseRecord(
+                annee=annee,
+                mission_code=str(row["Code Mission"]),
+                mission_libelle=str(row["Mission"]),
+                programme_code=str(programme),
+                programme_libelle=str(row["Libellé Programme"]),
+                action_code=f"{programme}-{action:02d}",
+                action_libelle=str(row["Libellé Action"]),
+                ae=float(row[col_ae]),
+                cp=float(row[col_cp]),
+            )
+        )
+    return out
+
+
 def normalize_depenses_legifrance(etat_b_html: str, annee: int) -> list[DepenseRecord]:
     """Normalise l'Etat B (repartition par mission et programme des credits du
     budget general) d'une LFI recuperee via l'API Legifrance/PISTE, en
