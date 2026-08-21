@@ -210,6 +210,10 @@ async def test_historique_mission_sans_filtre_retourne_toutes_les_annees(
     assert response.status_code == 200
     body = response.json()
     assert [item["annee"] for item in body] == [2023, 2024, 2025]
+    # Aucune depense rattachee dans ce jeu d'essai: les trois annees restent
+    # dans la serie, a 0. Une jointure interne les ferait disparaitre, ce qui
+    # transformerait un trou de donnees en absence de mission.
+    assert [item["montant_total"] for item in body] == [0.0, 0.0, 0.0]
 
 
 async def test_historique_mission_filtre_par_plage_de_a(
@@ -224,6 +228,20 @@ async def test_historique_mission_filtre_par_plage_de_a(
     assert response.status_code == 200
     body = response.json()
     assert [item["annee"] for item in body] == [2024]
+
+
+async def test_historique_mission_porte_le_montant_de_chaque_annee(
+    async_client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """La serie doit porter ses valeurs: un historique sans montant n'a aucun usage."""
+    await _seed_mission_justice(db_session)
+
+    response = await async_client.get("/api/v1/missions/justice/historique")
+
+    assert response.status_code == 200
+    body = response.json()
+    # Meme agregation que /missions et /missions/{slug}: 100 + 50 + 30.
+    assert body == [{"annee": ANNEE_REFERENCE, "nom_officiel": "Justice", "montant_total": 180.0}]
 
 
 async def test_historique_mission_inexistante_retourne_liste_vide(

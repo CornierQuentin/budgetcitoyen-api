@@ -41,6 +41,7 @@ class MissionHistoriqueItem(BaseModel):
 
     annee: int
     nom_officiel: str
+    montant_total: float
 
 
 class ActionDetailItem(BaseModel):
