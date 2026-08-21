@@ -197,11 +197,16 @@ async def _fetch_lfi_jorf(client: httpx.AsyncClient, text_cid: str) -> dict[str,
 
 _MARQUEUR_ETATS_ANNEXES = "ÉTATS LÉGISLATIFS ANNEXÉS"
 
-# Titre d'un etat annexe. Les lettres sont espacees dans les lois de 2012 a
-# 2014 ("É T A T A") et accolees a partir de 2015 ("ÉTAT A") - meme document,
-# deux mises en forme. Un `index("ÉTAT A")` litteral echouait donc sur les
-# textes anciens, ce qui rendait leurs annexes invisibles.
-_RE_TITRE_ETAT = "É\\s*T\\s*A\\s*T\\s+{lettre}"
+# Titre d'un etat annexe. TROIS mises en forme rencontrees sur la periode
+# 2012-2026, pour un titre pourtant identique dans le document imprime:
+#   "É T A T A" (2012-2014)  lettres espacees
+#   "ÉTAT A"    (2015-2016, 2018, 2021-2023, 2026)
+#   "Etat A"    (2017, 2019-2020)  sans accent, en minuscules
+# Un `index("ÉTAT A")` litteral n'en voyait qu'une et rendait les annexes des
+# deux autres invisibles. Le motif absorbe accent, casse et espaces; il ne
+# peut pas mordre sur "ÉTATS LÉGISLATIFS ANNEXÉS", dont le S suit
+# immediatement le T.
+_RE_TITRE_ETAT = "[EÉ]\\s*[Tt]\\s*[Aa]\\s*[Tt]\\s+{lettre}\\b"
 
 
 def _debut_etat(content: str, lettre: str, depuis: int = 0) -> int:

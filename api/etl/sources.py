@@ -253,6 +253,12 @@ LFI_TEXT_CID_PAR_ANNEE: dict[int, str] = {
     2013: "JORFTEXT000026856853",  # LOI n° 2012-1509 du 29 decembre 2012
     2014: "JORFTEXT000028399511",  # LOI n° 2013-1278 du 29 decembre 2013
     2015: "JORFTEXT000029988857",  # LOI n° 2014-1654 du 29 decembre 2014
+    2016: "JORFTEXT000031732865",  # LOI n° 2015-1785 du 29 decembre 2015
+    2017: "JORFTEXT000033734169",  # LOI n° 2016-1917 du 29 decembre 2016
+    2018: "JORFTEXT000036339197",  # LOI n° 2017-1837 du 30 decembre 2017
+    2019: "JORFTEXT000037882341",  # LOI n° 2018-1317 du 28 decembre 2018
+    2020: "JORFTEXT000039683923",  # LOI n° 2019-1479 du 28 decembre 2019
+    2022: "JORFTEXT000044637640",  # LOI n° 2021-1900 du 30 decembre 2021
     2021: "JORFTEXT000042753580",  # LOI n° 2020-1721 du 29 decembre 2020 (recettes seulement)
     2026: "JORFTEXT000053508155",  # LOI n° 2026-103 du 19 fevrier 2026
 }
@@ -285,7 +291,7 @@ RECETTES_LEGIFRANCE_ANNEES: tuple[int, ...] = tuple(sorted(LFI_TEXT_CID_PAR_ANNE
 # inclut budgets annexes et comptes speciaux (hors perimetre de ce projet) -
 # il vaut -78 712 M EUR pour 2012 la ou le budget general seul fait -74 367,
 # et l'ecart de 4,3 Md aurait fait conclure a tort a un rattrapage manquant.
-LFI_ETAT_A_MILLIERS_EUROS: tuple[int, ...] = (2012, 2013, 2014, 2015)
+LFI_ETAT_A_MILLIERS_EUROS: tuple[int, ...] = (2012, 2013, 2014, 2015, 2016)
 
 # Annees Legifrance necessitant un rattrapage brut/net cote recettes
 # (`api.etl.run._charger_recettes_legifrance`), limite au seul programme
@@ -488,7 +494,29 @@ RECETTES_COUR_DES_COMPTES_DELIMITER: dict[int, str] = {
     2023: ",",
 }
 
-RECETTES_COUR_DES_COMPTES_ANNEES: tuple[int, ...] = (2016, 2017, 2018, 2019, 2020, 2022, 2023)
+# Reduit a 2017 et 2023: les 5 autres millesimes sont passes a l'Etat A de
+# Legifrance, dont le solde du budget general se reconcilie a moins de 0,5 M
+# EUR pres avec l'article d'equilibre de chaque loi. Le gain n'est pas
+# cosmetique pour 2016: la Cour des comptes ne publie, pour ce millesime, que
+# le tableau "recettes fiscales nettes par impot" - sans les recettes non
+# fiscales, le deficit calcule ressortait a 173,9 Md EUR au lieu de 73,7.
+#
+# Seul 2023 reste ici. Ses recettes d'Etat A sont pourtant EXACTES (288 543 M
+# EUR, valeur du tableau d'equilibre a l'euro pres), mais elles sont nettes des
+# remboursements alors que les depenses en base sont brutes: le rattrapage a
+# appliquer reste a etablir contre le tableau d'equilibre, comme il l'a ete
+# pour 2026. Repris tel quel en attendant, plutot que publie avec une
+# asymetrie non resolue.
+#
+# Note sur 2017, desormais passe a Legifrance: son deficit calcule ressort a
+# 73,8 Md contre 74,7 a l'article d'equilibre. Les 991 M EUR d'ecart ne
+# viennent PAS des recettes mais des DEPENSES: la source data.economie de
+# cette annee totalise 426 379 M EUR la ou l'Etat B de la loi en compte
+# 427 369 (verifie; 2018 tombe au contraire a l'euro pres par la meme
+# mesure). Corriger cela imposerait de basculer aussi les depenses 2017 sur
+# l'Etat B, qui ne descend PAS au niveau des actions - on perdrait le detail
+# pour gagner 991 M EUR sur un total de 426 Md. Ecart documente, pas repare.
+RECETTES_COUR_DES_COMPTES_ANNEES: tuple[int, ...] = (2023,)
 
 
 def records_url(dataset_id: str) -> str:
