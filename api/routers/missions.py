@@ -37,8 +37,11 @@ async def historique_mission(
     de: int | None = None,
     a: int | None = None,
 ) -> list[MissionHistoriqueItem]:
-    missions = await mission_service.historique_mission(db, slug, de, a)
-    return [MissionHistoriqueItem.model_validate(m) for m in missions]
+    historique = await mission_service.historique_mission(db, slug, de, a)
+    return [
+        MissionHistoriqueItem(annee=annee, nom_officiel=nom, montant_total=montant)
+        for annee, nom, montant in historique
+    ]
 
 
 @router.get("/missions/{slug}/detail", response_model=MissionDetailResponse)

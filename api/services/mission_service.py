@@ -162,15 +162,43 @@ async def obtenir_mission_detail(
 
 async def historique_mission(
     db: AsyncSession, slug: str, de: int | None, a: int | None
-) -> list[Mission]:
-    """Retourne l'historique d'une mission (par slug) sur une plage d'annees."""
-    stmt = select(Mission).where(Mission.slug == slug).order_by(Mission.annee)
+) -> list[tuple[int, str, float]]:
+    """Retourne l'historique d'une mission (par slug): (annee, nom_officiel, CP).
+
+    Le montant est agrege ici plutot que laisse au client: une serie
+    temporelle sans ses valeurs n'a aucun usage, et la calculer annee par
+    annee via `totaux_depenses_par_mission` couterait une requete par annee
+    (15 pour une mission presente sur toute la periode).
+
+    `outerjoin` et non `join`: une annee ou la mission existe en nomenclature
+    sans aucune ligne de depense rattachee reste dans la serie, a 0, plutot
+    que d'en disparaitre silencieusement - un trou dans une serie temporelle
+    est une information, pas un detail de jointure.
+
+    Le nom officiel est retourne par annee car il varie: une mission gardant
+    le meme slug peut etre renommee d'une loi de finances a l'autre (cf.
+    `mission_alias`).
+    """
+    stmt = (
+        select(
+            Mission.annee,
+            Mission.nom_officiel,
+            func.coalesce(func.sum(Depense.cp), 0.0),
+        )
+        .select_from(Mission)
+        .outerjoin(Programme, Programme.mission_id == Mission.id)
+        .outerjoin(Action, Action.programme_id == Programme.id)
+        .outerjoin(Depense, Depense.action_id == Action.id)
+        .where(Mission.slug == slug)
+        .group_by(Mission.annee, Mission.nom_officiel)
+        .order_by(Mission.annee)
+    )
     if de is not None:
         stmt = stmt.where(Mission.annee >= de)
     if a is not None:
         stmt = stmt.where(Mission.annee <= a)
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    return [(annee, nom, float(total)) for annee, nom, total in result.all()]
 
 
 async def obtenir_programme(db: AsyncSession, programme_id: int, annee: int | None) -> Programme:
