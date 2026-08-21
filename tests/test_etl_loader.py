@@ -8,7 +8,7 @@ par `conftest.py`.
 
 import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.etl import loader
@@ -632,6 +632,59 @@ async def test_recalculer_annee_budget_calcule_le_deficit_avec_psr(
     # deficit = depenses - recettes = 1000 - 850 = 150
     assert float(annee_budget.deficit) == 150.0
     assert annee_budget.dette_pib is None
+
+
+async def test_recalculer_annee_budget_ajoute_le_rattrapage_brut_net(
+    db_session: AsyncSession,
+) -> None:
+    """Le rattrapage s'AJOUTE aux recettes, symetrique du PSR qui en est retranche.
+
+    Certaines annees expriment Etat A en montants nets de remboursements alors
+    que les depenses comparees sont brutes. Ce rattrapage ne transite PAS par
+    la table `recette`: ce n'est pas une recette, et l'y ranger faussait le
+    type AUTRES, publie tel quel dans le camembert du tableau de bord.
+    """
+    mapping = await loader.upsert_missions(
+        db_session,
+        [
+            MissionYearRow(
+                slug="justice",
+                nom_normalise="justice",
+                nom_officiel="Justice",
+                annee=2024,
+                code_mission="JA",
+            )
+        ],
+    )
+    await db_session.commit()
+    await loader.upsert_depenses(
+        db_session, 2024, [(_aggregat(cp=1000.0), mapping[("justice", 2024)])]
+    )
+    await loader.upsert_recettes(
+        db_session,
+        [RecetteAggregat(annee=2024, type=TypeRecette.IR, montant_brut=900.0, montant_net=900.0)],
+    )
+    await db_session.commit()
+
+    annee_budget = await loader.recalculer_annee_budget(
+        db_session,
+        2024,
+        "https://example.test",
+        prelevements_sur_recettes=50.0,
+        remboursements_impots_etat=200.0,
+    )
+    await db_session.commit()
+
+    assert annee_budget is not None
+    # recettes_nettes = 900 (brutes) + 200 (rattrapage) - 50 (PSR) = 1050
+    assert float(annee_budget.recettes_nettes) == 1050.0
+    assert float(annee_budget.deficit) == -50.0
+
+    # Et la table `recette` reste inchangee: le rattrapage n'y figure pas.
+    total_recettes = await db_session.scalar(
+        select(func.coalesce(func.sum(Recette.montant_net), 0)).where(Recette.annee == 2024)
+    )
+    assert float(total_recettes) == 900.0
 
 
 async def test_recalculer_annee_budget_est_idempotent_et_preserve_dette_pib(
