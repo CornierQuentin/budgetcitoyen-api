@@ -1156,9 +1156,10 @@ async def test_run_etl_route_les_recettes_cour_des_comptes(
     _patch_chargeurs(monkeypatch, appels)
     monkeypatch.setattr(run.loader, "recalculer_annee_budget", lambda *a, **k: _none_coro())
 
-    # 2019 : couvert par les depenses ET par la Cour des comptes
-    # (`RECETTES_COUR_DES_COMPTES_ANNEES`), pas par OpenDataSoft.
-    annee = 2019
+    # 2023 : dernier millesime encore couvert par la Cour des comptes
+    # (`RECETTES_COUR_DES_COMPTES_ANNEES`), les autres etant passes a l'Etat A
+    # de Legifrance.
+    annee = 2023
     assert annee in sources.RECETTES_COUR_DES_COMPTES_ANNEES
     assert annee not in sources.RECETTES_ANNEES
     await run.run_etl([annee], depenses=True, recettes=True, indicateurs=False)
@@ -1444,9 +1445,9 @@ async def test_annees_recettes_legifrance_sont_toutes_en_milliers_ou_declarees()
     sans rien casser visiblement. Ce test fige la repartition etablie
     exercice par exercice contre chaque tableau d'equilibre officiel.
     """
-    assert sources.LFI_ETAT_A_MILLIERS_EUROS == (2012, 2013, 2014, 2015)
-    # 2021 et 2026 sont deja en euros: les y ajouter multiplierait par 1000.
-    for annee in (2021, 2026):
+    assert sources.LFI_ETAT_A_MILLIERS_EUROS == (2012, 2013, 2014, 2015, 2016)
+    # Les autres sont deja en euros: les y ajouter multiplierait par 1000.
+    for annee in (2017, 2018, 2019, 2020, 2021, 2022, 2026):
         assert annee in sources.RECETTES_LEGIFRANCE_ANNEES
         assert annee not in sources.LFI_ETAT_A_MILLIERS_EUROS
 
