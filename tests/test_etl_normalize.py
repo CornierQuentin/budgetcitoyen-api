@@ -5,11 +5,14 @@ source reels observes sur data.economie.gouv.fr, copies dans
 `tests/fixtures/`.
 """
 
+import io
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
+from api.etl import normalize
 from api.etl.normalize import (
     aggregate_depenses,
     aggregate_recettes,
@@ -1210,3 +1213,64 @@ def test_normalize_marches_parquet_marcheinnovant_oui_non_convertis_en_booleen()
 
     assert any(r.marcheinnovant is True for r in records)
     assert any(r.marcheinnovant is False for r in records)
+
+
+# ---------------------------------------------------------------------------
+# normalize_depenses_lfi_xls (fichier LFI exploitable du ministere, 2026)
+# ---------------------------------------------------------------------------
+
+
+def _fixture_lfi_2026() -> bytes:
+    return (Path(__file__).parent / "fixtures" / "lfi_2026_credits_sample.xlsx").read_bytes()
+
+
+def test_normalize_depenses_lfi_xls_garde_le_budget_general_seul() -> None:
+    """Budgets annexes et comptes speciaux sont hors perimetre de toute la serie."""
+    records = normalize.normalize_depenses_lfi_xls(_fixture_lfi_2026(), 2026)
+
+    # La fixture contient 5 lignes BG et 2 hors BG.
+    assert len(records) == 5
+    assert {r.annee for r in records} == {2026}
+
+
+def test_normalize_depenses_lfi_xls_expose_numeros_et_actions() -> None:
+    """Ce que l'Etat B du Journal officiel ne donne pas: numeros et actions."""
+    records = normalize.normalize_depenses_lfi_xls(_fixture_lfi_2026(), 2026)
+
+    p178 = [r for r in records if r.programme_code == "178"]
+    # 4 lignes pour 3 actions: deux lignes portent la meme action (le fichier
+    # descend jusqu'a la sous-action), et c'est `aggregate_depenses` qui les
+    # somme en aval, pas ce normalizer.
+    assert len(p178) == 4
+    # Code d'action au format "<programme>-<action sur 2 chiffres>", identique
+    # aux autres annees pour que la nomenclature reste comparable.
+    assert {r.action_code for r in p178} == {"178-01", "178-02", "178-03"}
+    assert all(r.mission_libelle == "Défense" for r in p178)
+    assert all(r.mission_code == "DA" for r in p178)
+
+
+def test_normalize_depenses_lfi_xls_lit_les_montants_votes() -> None:
+    """Le fichier expose aussi les colonnes PLF et amendements: confondre les
+    trois donnerait un total plausible mais faux."""
+    records = normalize.normalize_depenses_lfi_xls(_fixture_lfi_2026(), 2026)
+
+    p200 = next(r for r in records if r.programme_code == "200")
+    # Ligne unique du programme 200 dans la fixture, montant vote.
+    assert p200.cp > 0
+    assert p200.ae > 0
+    # Le libelle porte "d'Etat" ACCENTUE dans cette source, la ou l'Etat B
+    # ecrit "d'Etat": c'est ce qui a impose d'elargir le filtre du rattrapage
+    # brut/net (cf. loader.get_remboursements_degrevements_impots_etat_cp).
+    assert "État" in p200.programme_libelle
+
+
+def test_normalize_depenses_lfi_xls_refuse_une_colonne_de_montant_ambigue() -> None:
+    """Une erreur de colonne de montant serait invisible et fausserait l'annee:
+    on leve plutot que de retomber sur une colonne voisine."""
+    df = pd.read_excel(io.BytesIO(_fixture_lfi_2026()))
+    df = df.drop(columns=[c for c in df.columns if str(c).startswith("CP (T2 + Hors T2) LFI")])
+    tampon = io.BytesIO()
+    df.to_excel(tampon, index=False)
+
+    with pytest.raises(ValueError, match="colonne"):
+        normalize.normalize_depenses_lfi_xls(tampon.getvalue(), 2026)

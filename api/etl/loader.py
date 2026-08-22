@@ -353,7 +353,11 @@ async def get_remboursements_degrevements_impots_etat_cp(db: AsyncSession, annee
         .where(
             Mission.slug == "remboursements-et-degrevements",
             Mission.annee == annee,
-            Programme.nom.ilike("%imp%ts d'Etat%"),
+            # "d'Etat" (Etat B Legifrance) comme "d'Etat" accentue (fichier
+            # LFI du ministere): le "%tat%" absorbe la difference. Sans cela le
+            # rattrapage retombait silencieusement a 0 en changeant de source,
+            # et le deficit 2026 se serait trompe de 141 Md EUR.
+            Programme.nom.ilike("%imp%ts d'%tat%"),
         )
     )
     return float(total or 0.0)
