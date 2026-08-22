@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import re
 import sys
 import zipfile
 from collections.abc import Iterable
@@ -196,6 +197,24 @@ async def _fetch_lfi_jorf(client: httpx.AsyncClient, text_cid: str) -> dict[str,
 
 _MARQUEUR_ETATS_ANNEXES = "ÉTATS LÉGISLATIFS ANNEXÉS"
 
+# Titre d'un etat annexe. Les lettres sont espacees dans les lois de 2012 a
+# 2014 ("É T A T A") et accolees a partir de 2015 ("ÉTAT A") - meme document,
+# deux mises en forme. Un `index("ÉTAT A")` litteral echouait donc sur les
+# textes anciens, ce qui rendait leurs annexes invisibles.
+_RE_TITRE_ETAT = "É\\s*T\\s*A\\s*T\\s+{lettre}"
+
+
+def _debut_etat(content: str, lettre: str, depuis: int = 0) -> int:
+    """Position du titre de l'etat `lettre` dans `content`, a partir de `depuis`.
+
+    Leve ValueError si absent, plutot que de retourner -1 qui produirait un
+    decoupage silencieusement decale.
+    """
+    trouve = re.search(_RE_TITRE_ETAT.format(lettre=lettre), content[depuis:])
+    if trouve is None:
+        raise ValueError(f"etat {lettre} introuvable dans les etats legislatifs annexes")
+    return depuis + trouve.start()
+
 
 def _walk_articles(node: dict[str, Any]) -> Iterable[dict[str, Any]]:
     """Parcourt recursivement `sections`/`articles` d'une reponse JORF (arborescence
@@ -213,8 +232,10 @@ def _extract_etats_html(jorf_json: dict[str, Any]) -> tuple[str, str]:
     `content` HTML d'UN SEUL article sans numero, repere par la marque
     textuelle "ETATS LEGISLATIFS ANNEXES" (pas par un id d'article fige, qui
     pourrait changer en cas de texte rectificatif - verifie a l'inspection
-    reelle: cet article porte un id JORFARTI mais aucun "num"). "ETAT A"/
-    "ETAT B"/"ETAT C" marquent le debut de chaque etat.
+    reelle: cet article porte un id JORFARTI mais aucun "num"). Les titres
+    "ETAT A"/"ETAT B"/"ETAT C" marquent le debut de chaque etat, reperes par
+    `_debut_etat` qui tolere les deux mises en forme rencontrees (lettres
+    espacees jusqu'en 2014, accolees ensuite).
 
     Chacun de ces etats peut lui-meme contenir PLUSIEURS tables HTML
     concatenees (Etat A: Budget general, puis Budgets annexes, Comptes
@@ -227,9 +248,9 @@ def _extract_etats_html(jorf_json: dict[str, Any]) -> tuple[str, str]:
     for article in _walk_articles(jorf_json):
         content = article.get("content") or ""
         if _MARQUEUR_ETATS_ANNEXES in content:
-            debut_a = content.index("ÉTAT A")
-            debut_b = content.index("ÉTAT B", debut_a)
-            debut_c = content.index("ÉTAT C", debut_b)
+            debut_a = _debut_etat(content, "A")
+            debut_b = _debut_etat(content, "B", debut_a + 1)
+            debut_c = _debut_etat(content, "C", debut_b + 1)
             return (
                 _premiere_table_html(content[debut_a:debut_b]),
                 _premiere_table_html(content[debut_b:debut_c]),

@@ -1419,3 +1419,55 @@ def test_main_marches_only(monkeypatch: pytest.MonkeyPatch) -> None:
         "depenses_fiscales": False,
         "marches": True,
     }
+
+
+async def test_debut_etat_tolere_les_deux_mises_en_forme() -> None:
+    """Les lois de 2012-2014 espacent les lettres du titre ("É T A T A"),
+    celles de 2015+ les accolent ("ÉTAT A"). Un `index` litteral echouait sur
+    les premieres, ce qui rendait leurs annexes — donc leurs recettes —
+    invisibles."""
+    assert run._debut_etat("préambule ÉTAT A<br/>(Art. 1)", "A") == 10
+    assert run._debut_etat("préambule É T A T A<br/>(Art. 60)", "A") == 10
+
+
+async def test_debut_etat_leve_plutot_que_de_decaler_le_decoupage() -> None:
+    """Retourner -1 produirait un decoupage silencieusement faux."""
+    with pytest.raises(ValueError, match="etat B"):
+        run._debut_etat("ÉTAT A seulement", "B")
+
+
+async def test_annees_recettes_legifrance_sont_toutes_en_milliers_ou_declarees() -> None:
+    """Garde-fou sur l'unite d'Etat A.
+
+    L'en-tete des lois 2012-2014 ne porte AUCUNE mention d'unite: l'oubli d'une
+    annee dans `LFI_ETAT_A_MILLIERS_EUROS` diviserait ses recettes par 1000
+    sans rien casser visiblement. Ce test fige la repartition etablie
+    exercice par exercice contre chaque tableau d'equilibre officiel.
+    """
+    assert sources.LFI_ETAT_A_MILLIERS_EUROS == (2012, 2013, 2014, 2015)
+    # 2021 et 2026 sont deja en euros: les y ajouter multiplierait par 1000.
+    for annee in (2021, 2026):
+        assert annee in sources.RECETTES_LEGIFRANCE_ANNEES
+        assert annee not in sources.LFI_ETAT_A_MILLIERS_EUROS
+
+
+async def test_depenses_2012_2014_ne_passent_pas_par_legifrance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ajouter ces annees a `LFI_TEXT_CID_PAR_ANNEE` sert aux RECETTES seules.
+
+    Leurs depenses viennent de data.economie et sont deja en base; les brancher
+    par erreur sur l'Etat B les remplacerait par une extraction qui, pour ces
+    millesimes, retourne zero ligne.
+    """
+
+    async def _interdit(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError("les depenses 2012-2014 ne doivent pas passer par Legifrance")
+
+    monkeypatch.setattr(run, "_fetch_lfi_jorf", _interdit)
+
+    for annee in (2012, 2013, 2014):
+        assert annee in sources.LFI_TEXT_CID_PAR_ANNEE
+        # La branche dediee de `_fetch_depenses_annee` doit primer: on verifie
+        # qu'elle est bien atteinte avant celle de Legifrance.
+        assert annee not in sources.DEPENSES_LFI_XLS_PAR_ANNEE
